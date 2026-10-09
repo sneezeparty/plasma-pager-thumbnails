@@ -1,0 +1,251 @@
+From 080ddda89f484c6e51dcb23906017643760cfc34 Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 10:24:11 -0700
+Subject: [PATCH 7/8] plugins/screencast: Let the client choose how often
+ hidden windows update
+
+stream_desktop carries the number of updates per second for windows
+that are not on screen, 1 by default and at most 30. A window with
+several throttled references draws at the rate of the fastest one.
+Replaces the KWIN_THROTTLED_OFFSCREEN_INTERVAL environment variable.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ .../screencast/desktopscreencastsource.cpp    | 13 ++++++----
+ .../screencast/desktopscreencastsource.h      |  4 +++-
+ src/plugins/screencast/screencastmanager.cpp  |  9 ++++++-
+ src/plugins/screencast/screencastmanager.h    |  1 +
+ src/wayland/screencast_v1.cpp                 |  3 ++-
+ src/wayland/screencast_v1.h                   |  4 +++-
+ src/window.cpp                                | 24 +++++++------------
+ src/window.h                                  |  6 ++---
+ 8 files changed, 37 insertions(+), 27 deletions(-)
+
+diff --git a/src/plugins/screencast/desktopscreencastsource.cpp b/src/plugins/screencast/desktopscreencastsource.cpp
+index 9ea362ab4f..ebad7f170a 100644
+--- a/src/plugins/screencast/desktopscreencastsource.cpp
++++ b/src/plugins/screencast/desktopscreencastsource.cpp
+@@ -31,13 +31,14 @@ namespace KWin
+ // Desktop streams are thumbnails, there is no point in keeping up with the display.
+ static const uint s_maxRefreshRate = 15000;
+ 
+-DesktopScreenCastSource::DesktopScreenCastSource(VirtualDesktop *desktop, LogicalOutput *output, const QSize &maxSize, bool excludeBackground)
++DesktopScreenCastSource::DesktopScreenCastSource(VirtualDesktop *desktop, LogicalOutput *output, const QSize &maxSize, bool excludeBackground, uint hiddenRefreshRate)
+     : ScreenCastSource()
+     , m_desktop(desktop)
+     , m_output(output)
+     , m_wholeWorkspace(!output)
+     , m_maxSize(maxSize)
+     , m_excludeBackground(excludeBackground)
++    , m_hiddenInterval(1000 / std::max(1u, hiddenRefreshRate))
+ {
+     Q_ASSERT(desktop);
+     Q_ASSERT(!m_maxSize.isEmpty());
+@@ -231,14 +232,14 @@ void DesktopScreenCastSource::scheduleFrame()
+ 
+ void DesktopScreenCastSource::watch(Window *window)
+ {
+-    // Windows on other desktops only need to be roughly up to date
+-    window->refThrottledOffscreenRendering();
++    // Windows on other desktops only need to be as up to date as was asked for
++    window->refThrottledOffscreenRendering(m_hiddenInterval);
+     connect(window, &Window::damaged, this, &DesktopScreenCastSource::scheduleFrame);
+ }
+ 
+ void DesktopScreenCastSource::unwatch(Window *window)
+ {
+-    window->unrefThrottledOffscreenRendering();
++    window->unrefThrottledOffscreenRendering(m_hiddenInterval);
+     disconnect(window, &Window::damaged, this, &DesktopScreenCastSource::scheduleFrame);
+ }
+ 
+@@ -308,7 +309,9 @@ uint DesktopScreenCastSource::refreshRate() const
+             ret = std::max<uint>(ret, output->refreshRate());
+         }
+     }
+-    return std::min(ret, s_maxRefreshRate);
++    // No point in a stream slower than the windows it shows are asked to draw
++    const uint hiddenRate = 1'000'000 / std::max<int>(1, m_hiddenInterval.count());
++    return std::min(ret, std::max(s_maxRefreshRate, hiddenRate));
+ }
+ 
+ void DesktopScreenCastSource::setRenderCursor(bool enable)
+diff --git a/src/plugins/screencast/desktopscreencastsource.h b/src/plugins/screencast/desktopscreencastsource.h
+index 4723296956..f3603215f1 100644
+--- a/src/plugins/screencast/desktopscreencastsource.h
++++ b/src/plugins/screencast/desktopscreencastsource.h
+@@ -34,8 +34,9 @@ class DesktopScreenCastSource : public ScreenCastSource
+ public:
+     /**
+      * If @p output is null, the stream covers the whole workspace.
++     * @p hiddenRefreshRate is how often a second windows that are not on screen draw.
+      */
+-    explicit DesktopScreenCastSource(VirtualDesktop *desktop, LogicalOutput *output, const QSize &maxSize, bool excludeBackground);
++    explicit DesktopScreenCastSource(VirtualDesktop *desktop, LogicalOutput *output, const QSize &maxSize, bool excludeBackground, uint hiddenRefreshRate);
+     ~DesktopScreenCastSource() override;
+ 
+     quint32 drmFormat() const override;
+@@ -77,6 +78,7 @@ private:
+     const bool m_wholeWorkspace;
+     const QSize m_maxSize;
+     const bool m_excludeBackground;
++    const std::chrono::milliseconds m_hiddenInterval;
+     // The windows shown in the stream, in stacking order
+     QList<Window *> m_windows;
+     std::chrono::nanoseconds m_last{0};
+diff --git a/src/plugins/screencast/screencastmanager.cpp b/src/plugins/screencast/screencastmanager.cpp
+index f509d77164..53e272b596 100644
+--- a/src/plugins/screencast/screencastmanager.cpp
++++ b/src/plugins/screencast/screencastmanager.cpp
+@@ -97,6 +97,7 @@ void ScreencastManager::streamDesktop(ScreencastStreamV1Interface *waylandStream
+                                       OutputInterface *output,
+                                       const QSize &maxSize,
+                                       bool excludeBackground,
++                                      uint hiddenRefreshRate,
+                                       ScreencastV1Interface::CursorMode mode)
+ {
+     if (!isSupportedCompositingType()) {
+@@ -124,7 +125,13 @@ void ScreencastManager::streamDesktop(ScreencastStreamV1Interface *waylandStream
+         }
+     }
+ 
+-    auto source = new DesktopScreenCastSource(desktop, logicalOutput, clampScaledSize(maxSize), excludeBackground);
++    // Once a second keeps a thumbnail roughly up to date at next to no cost. More is the
++    // client's choice, up to a rate that is still plenty for something this small.
++    static const uint s_defaultHiddenRefreshRate = 1;
++    static const uint s_maxHiddenRefreshRate = 30;
++    const uint hiddenRate = hiddenRefreshRate == 0 ? s_defaultHiddenRefreshRate : std::min(hiddenRefreshRate, s_maxHiddenRefreshRate);
++
++    auto source = new DesktopScreenCastSource(desktop, logicalOutput, clampScaledSize(maxSize), excludeBackground, hiddenRate);
+     auto stream = new ScreenCastStream(source, getPipewireConnection(), this);
+     stream->setObjectName(desktop->name());
+     stream->setCursorMode(mode);
+diff --git a/src/plugins/screencast/screencastmanager.h b/src/plugins/screencast/screencastmanager.h
+index 862f66d355..30f6b8ac87 100644
+--- a/src/plugins/screencast/screencastmanager.h
++++ b/src/plugins/screencast/screencastmanager.h
+@@ -36,6 +36,7 @@ private:
+                        OutputInterface *output,
+                        const QSize &maxSize,
+                        bool excludeBackground,
++                       uint hiddenRefreshRate,
+                        ScreencastV1Interface::CursorMode mode);
+     void streamWaylandOutput(ScreencastStreamV1Interface *stream,
+                              OutputInterface *output,
+diff --git a/src/wayland/screencast_v1.cpp b/src/wayland/screencast_v1.cpp
+index 08608b7488..e4bd3beb51 100644
+--- a/src/wayland/screencast_v1.cpp
++++ b/src/wayland/screencast_v1.cpp
+@@ -118,7 +118,7 @@ public:
+         Q_EMIT q->windowScreencastRequested(createStream(resource, streamid), uuid, QSize(std::min(width, s_max), std::min(height, s_max)), ScreencastV1Interface::CursorMode(pointer));
+     }
+ 
+-    void zkde_screencast_unstable_v1_stream_desktop(Resource *resource, uint32_t streamid, const QString &desktopId, struct ::wl_resource *output, uint32_t width, uint32_t height, uint32_t flags, uint32_t pointer) override
++    void zkde_screencast_unstable_v1_stream_desktop(Resource *resource, uint32_t streamid, const QString &desktopId, struct ::wl_resource *output, uint32_t width, uint32_t height, uint32_t flags, uint32_t hidden_refresh, uint32_t pointer) override
+     {
+         auto stream = createStream(resource, streamid);
+         OutputInterface *outputInterface = nullptr;
+@@ -136,6 +136,7 @@ public:
+                                              outputInterface,
+                                              QSize(std::min(width, s_max), std::min(height, s_max)),
+                                              flags & desktop_flags_exclude_background,
++                                             hidden_refresh,
+                                              ScreencastV1Interface::CursorMode(pointer));
+     }
+     void zkde_screencast_unstable_v1_stream_virtual_output(Resource *resource,
+diff --git a/src/wayland/screencast_v1.h b/src/wayland/screencast_v1.h
+index be2d4d9234..2524edb77b 100644
+--- a/src/wayland/screencast_v1.h
++++ b/src/wayland/screencast_v1.h
+@@ -73,8 +73,10 @@ Q_SIGNALS:
+     void windowScreencastRequested(ScreencastStreamV1Interface *stream, const QString &winid, const QSize &maxSize, CursorMode mode);
+     /**
+      * @p output is null if the stream should cover the whole workspace.
++     * @p hiddenRefreshRate is how often a second windows that are not on screen should
++     * draw for the stream, 0 for the default.
+      */
+-    void desktopScreencastRequested(ScreencastStreamV1Interface *stream, const QString &desktopId, OutputInterface *output, const QSize &maxSize, bool excludeBackground, CursorMode mode);
++    void desktopScreencastRequested(ScreencastStreamV1Interface *stream, const QString &desktopId, OutputInterface *output, const QSize &maxSize, bool excludeBackground, uint hiddenRefreshRate, CursorMode mode);
+     void regionScreencastRequested(ScreencastStreamV1Interface *stream, const Rect &geometry, qreal scaling, CursorMode mode);
+ 
+ private:
+diff --git a/src/window.cpp b/src/window.cpp
+index 8461720e8c..9e29bf7f71 100644
+--- a/src/window.cpp
++++ b/src/window.cpp
+@@ -4482,34 +4482,28 @@ void Window::unrefOffscreenRendering()
+     updateOffscreenRendering(wasOffscreenRendering);
+ }
+ 
+-void Window::refThrottledOffscreenRendering()
++void Window::refThrottledOffscreenRendering(std::chrono::milliseconds interval)
+ {
+     const bool wasOffscreenRendering = isOffscreenRendering();
+-    m_throttledOffscreenRenderCount++;
++    m_throttledOffscreenIntervals.append(std::max(interval, std::chrono::milliseconds(1)));
+     updateOffscreenRendering(wasOffscreenRendering);
+ }
+ 
+-void Window::unrefThrottledOffscreenRendering()
++void Window::unrefThrottledOffscreenRendering(std::chrono::milliseconds interval)
+ {
+-    Q_ASSERT(m_throttledOffscreenRenderCount);
+     const bool wasOffscreenRendering = isOffscreenRendering();
+-    m_throttledOffscreenRenderCount--;
++    const bool removed = m_throttledOffscreenIntervals.removeOne(std::max(interval, std::chrono::milliseconds(1)));
++    Q_ASSERT(removed);
+     updateOffscreenRendering(wasOffscreenRendering);
+ }
+ 
+-// TODO: temporary knob for measuring, to be replaced by a proper setting.
+-static int throttledOffscreenInterval()
+-{
+-    static const int interval = qEnvironmentVariableIsSet("KWIN_THROTTLED_OFFSCREEN_INTERVAL") ? std::max(1, qEnvironmentVariableIntValue("KWIN_THROTTLED_OFFSCREEN_INTERVAL")) : 1000;
+-    return interval;
+-}
+-
+ void Window::updateOffscreenRendering(bool wasOffscreenRendering)
+ {
+     if (m_offscreenRenderCount > 0) {
+         m_offscreenFramecallbackTimer.start(1'000'000 / output()->refreshRate());
+-    } else if (m_throttledOffscreenRenderCount > 0) {
+-        m_offscreenFramecallbackTimer.start(throttledOffscreenInterval());
++    } else if (!m_throttledOffscreenIntervals.isEmpty()) {
++        // Whoever wants it most often decides
++        m_offscreenFramecallbackTimer.start(*std::ranges::min_element(m_throttledOffscreenIntervals));
+     } else {
+         m_offscreenFramecallbackTimer.stop();
+     }
+@@ -4521,7 +4515,7 @@ void Window::updateOffscreenRendering(bool wasOffscreenRendering)
+ 
+ bool Window::isOffscreenRendering() const
+ {
+-    return m_offscreenRenderCount > 0 || m_throttledOffscreenRenderCount > 0;
++    return m_offscreenRenderCount > 0 || !m_throttledOffscreenIntervals.isEmpty();
+ }
+ 
+ void Window::maybeSendFrameCallback()
+diff --git a/src/window.h b/src/window.h
+index 227ab1ca88..94292d78d7 100644
+--- a/src/window.h
++++ b/src/window.h
+@@ -1401,8 +1401,8 @@ public:
+      * asked to draw about once per second, instead of at the refresh rate of its
+      * output. Meant for thumbnails of windows that would otherwise be idle.
+      */
+-    void refThrottledOffscreenRendering();
+-    void unrefThrottledOffscreenRendering();
++    void refThrottledOffscreenRendering(std::chrono::milliseconds interval);
++    void unrefThrottledOffscreenRendering(std::chrono::milliseconds interval);
+     bool isOffscreenRendering() const;
+ 
+     qreal targetScale() const;
+@@ -1942,7 +1942,7 @@ protected:
+     bool m_lockScreenOverlay = false;
+     void updateOffscreenRendering(bool wasOffscreenRendering);
+     uint32_t m_offscreenRenderCount = 0;
+-    uint32_t m_throttledOffscreenRenderCount = 0;
++    QList<std::chrono::milliseconds> m_throttledOffscreenIntervals;
+     QTimer m_offscreenFramecallbackTimer;
+ 
+     QString m_tag;

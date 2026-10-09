@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kcfg xmlns="http://www.kde.org/standards/kcfg/1.0"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
+      http://www.kde.org/standards/kcfg/1.0/kcfg.xsd" >
+  <kcfgfile name=""/>
+  <group name="General">
+    <entry name="Settings" type="String">
+      <label>JSON: {"default": entry, "desktops": {"desktop id": entry}}, entry = {"mode": "image" or "folder", "url", "order": "sequential" or "random", "interval": seconds}.</label>
+      <default></default>
+    </entry>
+    <entry name="FillMode" type="int">
+      <label>How the image is fitted to the screen (QtQuick Image.fillMode).</label>
+      <default>2</default>
+    </entry>
+    <entry name="Color" type="Color">
+      <label>Colour shown around images that do not cover the screen.</label>
+      <default>#000000</default>
+    </entry>
+    <entry name="CurrentImages" type="StringList">
+      <label>Written by the wallpaper: the image currently shown for each virtual desktop, as "desktop id=url". Read by the pager.</label>
+      <default></default>
+    </entry>
+    <entry name="State" type="String">
+      <label>Written by the wallpaper: JSON with the image each folder is on and for which interval, so that a pick lasts until its interval is over.</label>
+      <default></default>
+    </entry>
+  </group>
+</kcfg>

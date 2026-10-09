@@ -1,0 +1,161 @@
+From 9a7d308f3b3f8df1d51634bfaad5c4889fe2dce4 Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 07:03:39 -0700
+Subject: [PATCH 4/7] applets/pager: Ask the shell which screen has which
+ number
+
+The wallpaper of a screen was looked up by guessing that Plasma numbers
+Qt's primary screen first. On Wayland that is only the first screen that
+was announced, so with two screens the wallpapers could end up swapped.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ applets/pager/desktopwallpapers.cpp | 45 +++++++++++++++++++++++++++--
+ applets/pager/desktopwallpapers.h   | 12 ++++++++
+ applets/pager/qml/main.qml          |  1 +
+ 3 files changed, 55 insertions(+), 3 deletions(-)
+
+diff --git a/applets/pager/desktopwallpapers.cpp b/applets/pager/desktopwallpapers.cpp
+index dca48c3928..fa75980988 100644
+--- a/applets/pager/desktopwallpapers.cpp
++++ b/applets/pager/desktopwallpapers.cpp
+@@ -9,6 +9,7 @@
+ 
+ #include <KConfig>
+ #include <KConfigGroup>
++#include <Plasma/Corona>
+ 
+ #include <QDir>
+ #include <QFileInfo>
+@@ -88,9 +89,22 @@ void DesktopWallpapers::reload()
+ {
+     watch();
+ 
+-    // Plasma numbers the screens; the names are in plasmashellrc.
++    // Plasma numbers the screens, in an order of its own. The shell knows it.
+     QHash<QString, QString> connectors;
+-    {
++    if (m_corona) {
++        const auto screens = QGuiApplication::screens();
++        for (int id = 0; id < m_corona->numScreens(); ++id) {
++            const QRect geometry = m_corona->screenGeometry(id);
++            for (const QScreen *screen : screens) {
++                if (screen->geometry() == geometry) {
++                    connectors.insert(QString::number(id), screen->name());
++                    break;
++                }
++            }
++        }
++    }
++    if (connectors.isEmpty()) {
++        // Older versions saved the names in plasmashellrc.
+         const KConfig shellrc(configPath(s_shellrc), KConfig::SimpleConfig);
+         const KConfigGroup group = shellrc.group(u"ScreenConnectors"_s);
+         const auto keys = group.keyList();
+@@ -99,7 +113,7 @@ void DesktopWallpapers::reload()
+         }
+     }
+     if (connectors.isEmpty()) {
+-        // Nothing saved yet, as in a brand new session: Plasma numbers the primary screen first.
++        // Without either, guess: Plasma numbers the primary screen first.
+         QList<QScreen *> screens = QGuiApplication::screens();
+         screens.removeOne(QGuiApplication::primaryScreen());
+         screens.prepend(QGuiApplication::primaryScreen());
+@@ -155,6 +169,31 @@ void DesktopWallpapers::reload()
+     Q_EMIT revisionChanged();
+ }
+ 
++QObject *DesktopWallpapers::corona() const
++{
++    return m_corona;
++}
++
++void DesktopWallpapers::setCorona(QObject *corona)
++{
++    auto *shell = qobject_cast<Plasma::Corona *>(corona);
++    if (m_corona == shell) {
++        return;
++    }
++    if (m_corona) {
++        disconnect(m_corona, nullptr, this, nullptr);
++    }
++    m_corona = shell;
++    if (m_corona) {
++        // Screens get renumbered when one is added, removed or made the primary one.
++        connect(m_corona, &Plasma::Corona::screenAdded, &m_reloadTimer, qOverload<>(&QTimer::start));
++        connect(m_corona, &Plasma::Corona::screenRemoved, &m_reloadTimer, qOverload<>(&QTimer::start));
++        connect(m_corona, &Plasma::Corona::screenGeometryChanged, &m_reloadTimer, qOverload<>(&QTimer::start));
++    }
++    Q_EMIT coronaChanged();
++    reload();
++}
++
+ int DesktopWallpapers::revision() const
+ {
+     return m_revision;
+diff --git a/applets/pager/desktopwallpapers.h b/applets/pager/desktopwallpapers.h
+index aa758ebd0a..8c5aa7952e 100644
+--- a/applets/pager/desktopwallpapers.h
++++ b/applets/pager/desktopwallpapers.h
+@@ -9,10 +9,15 @@
+ #include <QFileSystemWatcher>
+ #include <QHash>
+ #include <QObject>
++#include <QPointer>
+ #include <QTimer>
+ #include <QUrl>
+ #include <qqmlregistration.h>
+ 
++namespace Plasma
++{
++class Corona;
++}
+ namespace TaskManager
+ {
+ class ActivityInfo;
+@@ -33,12 +38,17 @@ class DesktopWallpapers : public QObject
+ 
+     /** Changes whenever any of the answers below may have changed. */
+     Q_PROPERTY(int revision READ revision NOTIFY revisionChanged)
++    /** The shell's corona, which knows the number Plasma gave to each screen. */
++    Q_PROPERTY(QObject *corona READ corona WRITE setCorona NOTIFY coronaChanged)
+ 
+ public:
+     explicit DesktopWallpapers(QObject *parent = nullptr);
+ 
+     int revision() const;
+ 
++    QObject *corona() const;
++    void setCorona(QObject *corona);
++
+     /** Whether the wallpaper of the screen is of a kind whose image is known. */
+     Q_INVOKABLE bool known(const QString &screenName) const;
+     /** The image the screen shows on the virtual desktop, empty if there is none. */
+@@ -50,6 +60,7 @@ public:
+ 
+ Q_SIGNALS:
+     void revisionChanged();
++    void coronaChanged();
+ 
+ private:
+     struct Screen {
+@@ -65,6 +76,7 @@ private:
+     QHash<QString, Screen> m_screens; // by connector name
+     QFileSystemWatcher m_watcher;
+     QTimer m_reloadTimer;
++    QPointer<Plasma::Corona> m_corona;
+     TaskManager::ActivityInfo *const m_activityInfo;
+     int m_revision = 0;
+ };
+diff --git a/applets/pager/qml/main.qml b/applets/pager/qml/main.qml
+index 69f0f56264..22ba5bc055 100644
+--- a/applets/pager/qml/main.qml
++++ b/applets/pager/qml/main.qml
+@@ -137,6 +137,7 @@ PlasmoidItem {
+ 
+     DesktopWallpapers {
+         id: wallpapers
++        corona: Plasmoid.containment?.corona ?? null
+     }
+ 
+     PagerModel {

@@ -1,0 +1,23 @@
+From a8cd4e3a752e9fa6bb943ee5bd7754100fde9734 Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 10:41:59 -0700
+Subject: [PATCH 4/4] screencast: The compositor clamps hidden_refresh
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ src/protocols/zkde-screencast-unstable-v1.xml | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/protocols/zkde-screencast-unstable-v1.xml b/src/protocols/zkde-screencast-unstable-v1.xml
+index 4773bdd..11619db 100644
+--- a/src/protocols/zkde-screencast-unstable-v1.xml
++++ b/src/protocols/zkde-screencast-unstable-v1.xml
+@@ -117,7 +117,7 @@
+                 Windows of a virtual desktop that is not shown are not on
+                 screen and would not draw. hidden_refresh is how many times
+                 a second the compositor asks them to draw for this stream,
+-                0 for the compositor's default. The compositor may clamp it.
++                0 for the compositor's default. The compositor clamps it.
+             </description>
+             <arg name="stream" type="new_id" interface="zkde_screencast_stream_unstable_v1"/>
+             <arg name="desktop_id" type="string" summary="virtual desktop Identifier"/>

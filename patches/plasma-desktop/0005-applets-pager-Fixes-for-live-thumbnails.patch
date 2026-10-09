@@ -1,0 +1,349 @@
+From 3ba19eb3d0002ed6db1c28bdf2ba884661f5f769 Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 07:49:21 -0700
+Subject: [PATCH 5/7] applets/pager: Fixes for live thumbnails
+
+- A click on a tile no longer resets the model, which restarted every
+  desktop's stream.
+- A window being dragged is drawn, also when the outlines are off.
+- No application icons on rectangles that are only drag handles.
+- The streams are paused while a fullscreen window is in use on the
+  pager's screen.
+- The wallpaper lookup only reads the config files again when they
+  changed, and only reports a change when there is one.
+- Mirrored screens, and centered and tiled wallpapers.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ applets/pager/desktopwallpapers.cpp | 88 ++++++++++++++++++++++++-----
+ applets/pager/desktopwallpapers.h   | 11 ++++
+ applets/pager/qml/main.qml          | 54 ++++++++++++++++--
+ 3 files changed, 133 insertions(+), 20 deletions(-)
+
+diff --git a/applets/pager/desktopwallpapers.cpp b/applets/pager/desktopwallpapers.cpp
+index fa75980988..8a597d8769 100644
+--- a/applets/pager/desktopwallpapers.cpp
++++ b/applets/pager/desktopwallpapers.cpp
+@@ -13,7 +13,9 @@
+ 
+ #include <QDir>
+ #include <QFileInfo>
++#include <QDateTime>
+ #include <QGuiApplication>
++#include <QImageReader>
+ #include <QRegularExpression>
+ #include <QScreen>
+ #include <QStandardPaths>
+@@ -60,20 +62,54 @@ DesktopWallpapers::DesktopWallpapers(QObject *parent)
+     , m_activityInfo(new TaskManager::ActivityInfo(this))
+ {
+     // The files are rewritten, not edited in place, and often several times in a row.
++    // The timer is left to run out rather than restarted, so that a busy directory
++    // can't put a reload off forever.
+     m_reloadTimer.setSingleShot(true);
+     m_reloadTimer.setInterval(250);
+-    connect(&m_reloadTimer, &QTimer::timeout, this, &DesktopWallpapers::reload);
+-    connect(&m_watcher, &QFileSystemWatcher::fileChanged, &m_reloadTimer, qOverload<>(&QTimer::start));
+-    connect(&m_watcher, &QFileSystemWatcher::directoryChanged, &m_reloadTimer, qOverload<>(&QTimer::start));
++    connect(&m_reloadTimer, &QTimer::timeout, this, &DesktopWallpapers::reloadIfChanged);
++    connect(&m_watcher, &QFileSystemWatcher::fileChanged, this, &DesktopWallpapers::scheduleReload);
++    connect(&m_watcher, &QFileSystemWatcher::directoryChanged, this, &DesktopWallpapers::scheduleReload);
+     connect(m_activityInfo, &TaskManager::ActivityInfo::currentActivityChanged, this, &DesktopWallpapers::reload);
+ 
+     m_watcher.addPath(QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation));
+-    connect(qGuiApp, &QGuiApplication::screenAdded, this, &DesktopWallpapers::reload);
+-    connect(qGuiApp, &QGuiApplication::screenRemoved, this, &DesktopWallpapers::reload);
+-    connect(qGuiApp, &QGuiApplication::primaryScreenChanged, this, &DesktopWallpapers::reload);
++    // The shell numbers a new screen a little after it appears; wait for that
++    connect(qGuiApp, &QGuiApplication::screenAdded, this, &DesktopWallpapers::scheduleForcedReload);
++    connect(qGuiApp, &QGuiApplication::screenRemoved, this, &DesktopWallpapers::scheduleForcedReload);
++    connect(qGuiApp, &QGuiApplication::primaryScreenChanged, this, &DesktopWallpapers::scheduleForcedReload);
+     reload();
+ }
+ 
++void DesktopWallpapers::scheduleReload()
++{
++    if (!m_reloadTimer.isActive()) {
++        m_reloadTimer.start();
++    }
++}
++
++void DesktopWallpapers::scheduleForcedReload()
++{
++    m_forceReload = true;
++    scheduleReload();
++}
++
++static QString fingerprint()
++{
++    // Every program that saves its settings changes the directory; only these two files matter.
++    QString result;
++    for (const QString &name : {s_appletsrc, s_shellrc}) {
++        const QFileInfo info(configPath(name));
++        result += QString::number(info.lastModified().toMSecsSinceEpoch()) + u':' + QString::number(info.size()) + u';';
++    }
++    return result;
++}
++
++void DesktopWallpapers::reloadIfChanged()
++{
++    if (m_forceReload || fingerprint() != m_fingerprint) {
++        reload();
++    }
++}
++
+ void DesktopWallpapers::watch()
+ {
+     // A file that was replaced has to be added again.
+@@ -88,17 +124,19 @@ void DesktopWallpapers::watch()
+ void DesktopWallpapers::reload()
+ {
+     watch();
++    m_forceReload = false;
++    m_fingerprint = fingerprint();
+ 
+     // Plasma numbers the screens, in an order of its own. The shell knows it.
+-    QHash<QString, QString> connectors;
++    QMultiHash<QString, QString> connectors;
+     if (m_corona) {
+         const auto screens = QGuiApplication::screens();
+         for (int id = 0; id < m_corona->numScreens(); ++id) {
+             const QRect geometry = m_corona->screenGeometry(id);
+             for (const QScreen *screen : screens) {
++                // More than one if the screens are mirrored
+                 if (screen->geometry() == geometry) {
+                     connectors.insert(QString::number(id), screen->name());
+-                    break;
+                 }
+             }
+         }
+@@ -129,8 +167,8 @@ void DesktopWallpapers::reload()
+     const auto ids = containments.groupList();
+     for (const QString &id : ids) {
+         const KConfigGroup containment = containments.group(id);
+-        const QString connector = connectors.value(containment.readEntry("lastScreen", u"-1"_s));
+-        if (connector.isEmpty() || !containment.hasKey("wallpaperplugin")) {
++        const QStringList names = connectors.values(containment.readEntry("lastScreen", u"-1"_s));
++        if (names.isEmpty() || !containment.hasKey("wallpaperplugin")) {
+             continue;
+         }
+         // Desktops belong to an activity; panels and the system tray don't, but carry the same keys.
+@@ -161,9 +199,14 @@ void DesktopWallpapers::reload()
+             // A slideshow, a picture of the day, an animated wallpaper: only its window knows.
+             continue;
+         }
+-        screens.insert(connector, screen);
++        for (const QString &name : names) {
++            screens.insert(name, screen);
++        }
+     }
+ 
++    if (m_screens == screens && m_revision > 0) {
++        return;
++    }
+     m_screens = screens;
+     ++m_revision;
+     Q_EMIT revisionChanged();
+@@ -186,9 +229,9 @@ void DesktopWallpapers::setCorona(QObject *corona)
+     m_corona = shell;
+     if (m_corona) {
+         // Screens get renumbered when one is added, removed or made the primary one.
+-        connect(m_corona, &Plasma::Corona::screenAdded, &m_reloadTimer, qOverload<>(&QTimer::start));
+-        connect(m_corona, &Plasma::Corona::screenRemoved, &m_reloadTimer, qOverload<>(&QTimer::start));
+-        connect(m_corona, &Plasma::Corona::screenGeometryChanged, &m_reloadTimer, qOverload<>(&QTimer::start));
++        connect(m_corona, &Plasma::Corona::screenAdded, this, &DesktopWallpapers::scheduleForcedReload);
++        connect(m_corona, &Plasma::Corona::screenRemoved, this, &DesktopWallpapers::scheduleForcedReload);
++        connect(m_corona, &Plasma::Corona::screenGeometryChanged, this, &DesktopWallpapers::scheduleForcedReload);
+     }
+     Q_EMIT coronaChanged();
+     reload();
+@@ -223,4 +266,21 @@ QColor DesktopWallpapers::color(const QString &screenName) const
+     return m_screens.value(screenName).color;
+ }
+ 
++QSize DesktopWallpapers::imageSize(const QUrl &image)
++{
++    if (!image.isLocalFile()) {
++        return QSize();
++    }
++    const QString path = image.toLocalFile();
++    auto it = m_imageSizes.constFind(path);
++    if (it == m_imageSizes.constEnd()) {
++        if (m_imageSizes.size() > 64) {
++            m_imageSizes.clear();
++        }
++        // Reads the header only
++        it = m_imageSizes.insert(path, QImageReader(path).size());
++    }
++    return *it;
++}
++
+ #include "moc_desktopwallpapers.cpp"
+diff --git a/applets/pager/desktopwallpapers.h b/applets/pager/desktopwallpapers.h
+index 8c5aa7952e..1aa37e0981 100644
+--- a/applets/pager/desktopwallpapers.h
++++ b/applets/pager/desktopwallpapers.h
+@@ -9,6 +9,7 @@
+ #include <QFileSystemWatcher>
+ #include <QHash>
+ #include <QObject>
++#include <QSize>
+ #include <QPointer>
+ #include <QTimer>
+ #include <QUrl>
+@@ -57,6 +58,8 @@ public:
+     Q_INVOKABLE int fillMode(const QString &screenName) const;
+     /** The colour behind images that don't cover the screen. */
+     Q_INVOKABLE QColor color(const QString &screenName) const;
++    /** The size of the image in pixels, for the fill modes that don't scale it. */
++    Q_INVOKABLE QSize imageSize(const QUrl &image);
+ 
+ Q_SIGNALS:
+     void revisionChanged();
+@@ -68,9 +71,14 @@ private:
+         QUrl image; // for every desktop without an entry above
+         int fillMode = 2;
+         QColor color = Qt::black;
++
++        bool operator==(const Screen &other) const = default;
+     };
+ 
+     void reload();
++    void reloadIfChanged();
++    void scheduleReload();
++    void scheduleForcedReload();
+     void watch();
+ 
+     QHash<QString, Screen> m_screens; // by connector name
+@@ -79,4 +87,7 @@ private:
+     QPointer<Plasma::Corona> m_corona;
+     TaskManager::ActivityInfo *const m_activityInfo;
+     int m_revision = 0;
++    bool m_forceReload = false;
++    QString m_fingerprint;
++    QHash<QString, QSize> m_imageSizes;
+ };
+diff --git a/applets/pager/qml/main.qml b/applets/pager/qml/main.qml
+index 22ba5bc055..78b9c4c987 100644
+--- a/applets/pager/qml/main.qml
++++ b/applets/pager/qml/main.qml
+@@ -221,11 +221,38 @@ PlasmoidItem {
+             required property var decoration//: null
+ 
+             source: decoration ?? undefined
++            // Icons belong to the outlines; a rectangle that is only a drag handle has none
++            visible: parent.outlined ?? true
+             roundToIconSize: false
+             animated: false
+         }
+     }
+ 
++    // Whether the window in use is a fullscreen one on the screen of this pager. It
++    // covers the panel then, and the thumbnails are stopped: nobody can see them, and
++    // a game or a video is better left alone.
++    property bool covered: false
++
++    TaskManager.TasksModel {
++        id: activeWindowModel
++
++        groupMode: TaskManager.TasksModel.GroupDisabled
++
++        function updateCovered(): void {
++            const task = activeTask;
++            const screen = data(task, TaskManager.AbstractTasksModel.ScreenGeometry);
++            const ours = Plasmoid.containment.screenGeometry;
++            root.covered = task.valid
++                && data(task, TaskManager.AbstractTasksModel.IsFullScreen) === true
++                && screen !== undefined
++                && screen.x === ours.x && screen.y === ours.y && screen.width === ours.width && screen.height === ours.height;
++        }
++
++        onActiveTaskChanged: updateCovered()
++        onDataChanged: updateCovered()
++        Component.onCompleted: updateCovered()
++    }
++
+     Timer {
+         id: dragTimer
+         interval: 1000
+@@ -507,11 +534,17 @@ PlasmoidItem {
+                                 clip: true
+ 
+                                 Image {
++                                    // Centered and tiled wallpapers are shown at their own size, not at the screen's
++                                    readonly property bool unscaled: fillMode === Image.Pad || fillMode === Image.Tile
++                                    readonly property size naturalSize: unscaled ? wallpapers.imageSize(source) : Qt.size(0, 0)
++
+                                     anchors.fill: parent
+                                     source: wallpapers.revision >= 0 ? wallpapers.image(screenWallpaper.screenName, desktop.desktopId) : ""
+                                     fillMode: wallpapers.revision >= 0 ? wallpapers.fillMode(screenWallpaper.screenName) : Image.PreserveAspectCrop
+                                     // Tiles are small; decode at a size that still looks sharp on dense screens
+-                                    sourceSize: Qt.size(Math.max(1, width) * root.Screen.devicePixelRatio * 2, Math.max(1, height) * root.Screen.devicePixelRatio * 2)
++                                    sourceSize: unscaled
++                                        ? Qt.size(Math.max(1, Math.round(naturalSize.width * wallpaperLayer.scaleX)), Math.max(1, Math.round(naturalSize.height * wallpaperLayer.scaleY)))
++                                        : Qt.size(Math.max(1, width) * root.Screen.devicePixelRatio * 2, Math.max(1, height) * root.Screen.devicePixelRatio * 2)
+                                     asynchronous: true
+                                     cache: true
+                                     smooth: true
+@@ -529,11 +562,13 @@ PlasmoidItem {
+ 
+                         anchors.fill: parent
+                         z: 0 // Below the window rectangles
+-                        active: Plasmoid.configuration.showThumbnails && !root.isActivityPager
++                        active: Plasmoid.configuration.showThumbnails && !root.isActivityPager && Qt.platform.pluginName.startsWith("wayland")
+                             && desktop.desktopId !== "" && clipRect.width > 0 && clipRect.height > 0
+ 
+                         sourceComponent: PipeWire.PipeWireSourceItem {
+                             nodeId: desktopStream.nodeId
++                            // An item that isn't shown pauses its stream
++                            visible: !root.covered
+ 
+                             TaskManager.ScreencastingRequest {
+                                 id: desktopStream
+@@ -566,7 +601,9 @@ PlasmoidItem {
+                             readonly property bool isActive: model.IsActive
+                             readonly property int stackingOrder: model.StackingOrder
+                             // Over a live thumbnail the rectangle is only a drag handle, unless outlines are wanted there too
+-                            readonly property bool outlined: thumbnailLoader.live ? Plasmoid.configuration.showOutlinesOverThumbnails : Plasmoid.configuration.showWindowOutlines
++                            // ... or while it is being dragged, so that there is something to see moving
++                            property bool dragged: false
++                            readonly property bool outlined: dragged || (thumbnailLoader.live ? Plasmoid.configuration.showOutlinesOverThumbnails : Plasmoid.configuration.showWindowOutlines)
+                         }
+ 
+                         delegate: WindowDelegate {
+@@ -575,6 +612,8 @@ PlasmoidItem {
+                             onMinimizedChanged: desktop.updateSubTextIfNeeded()
+                             onDisplayChanged: desktop.updateSubTextIfNeeded()
+ 
++                            dragged: windowMouseArea.drag.active
++
+                             z: 1 + stackingOrder
+                             /* since we move clipRect with 1, move it back */
+                             x: Math.round(geometry.x * pagerItemGrid.widthScaleFactor) - 1
+@@ -610,7 +649,9 @@ PlasmoidItem {
+                                 anchors.fill: parent
+ 
+                                 drag.target: windowRect
+-                                drag.threshold: 1
++                                // Over a thumbnail the handles can't be seen, and nearly every click on a
++                                // tile lands on one: don't take a shaky click for a drag there
++                                drag.threshold: thumbnailLoader.live && !Plasmoid.configuration.showOutlinesOverThumbnails ? Application.styleHints.startDragDistance : 1
+                                 drag.axis: Drag.XAndYAxis
+                                 drag.minimumX: 0
+                                 drag.maximumX: root.width - windowRect.width
+@@ -649,12 +690,13 @@ PlasmoidItem {
+                                         // Will reset the model, destroying the reparented drag delegate that
+                                         // is no longer bound to model.Geometry.
+                                         root.dragging = false;
++                                        pagerModel.refresh();
+                                     } else {
+                                         // When there is no dragging (just a click), the event is passed
+-                                        // to the desktop MouseArea.
++                                        // to the desktop MouseArea. Nothing moved, so there is nothing to
++                                        // reset either; a reset would restart every desktop's thumbnail.
+                                         desktopMouseArea.clicked(mouse);
+                                     }
+-                                    pagerModel.refresh();
+                                 }
+                             }
+ 

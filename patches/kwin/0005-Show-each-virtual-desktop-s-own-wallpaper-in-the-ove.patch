@@ -1,0 +1,449 @@
+From d3a02b146d243ddb0e58f2fb4a0589b776b41176 Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 06:13:15 -0700
+Subject: [PATCH 5/8] Show each virtual desktop's own wallpaper in the overview
+
+DesktopBackground reports the image of a desktop whose wallpaper differs from what the single desktop window shows, read from Plasma's containment configuration, and the overview's grid and desktop bar draw it.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ src/CMakeLists.txt                       |   1 +
+ src/plugins/overview/qml/DesktopView.qml |  30 +++++-
+ src/plugins/overview/qml/Main.qml        |  26 ++++-
+ src/scripting/desktopbackgrounditem.cpp  |  43 ++++++++
+ src/scripting/desktopbackgrounditem.h    |  30 ++++++
+ src/scripting/desktopwallpapers.cpp      | 119 +++++++++++++++++++++++
+ src/scripting/desktopwallpapers.h        |  71 ++++++++++++++
+ 7 files changed, 317 insertions(+), 3 deletions(-)
+ create mode 100644 src/scripting/desktopwallpapers.cpp
+ create mode 100644 src/scripting/desktopwallpapers.h
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index ac1a3a566d..a5f13056fd 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -199,6 +199,7 @@ target_sources(kwin PRIVATE
+     screenedgegestures.cpp
+     scripting/dbuscall.cpp
+     scripting/desktopbackgrounditem.cpp
++    scripting/desktopwallpapers.cpp
+     scripting/gesturehandler.cpp
+     scripting/screenedgehandler.cpp
+     scripting/scriptedeffect.cpp
+diff --git a/src/plugins/overview/qml/DesktopView.qml b/src/plugins/overview/qml/DesktopView.qml
+index bf5a5f0092..be8b5499d8 100644
+--- a/src/plugins/overview/qml/DesktopView.qml
++++ b/src/plugins/overview/qml/DesktopView.qml
+@@ -13,6 +13,33 @@ Item {
+     required property QtObject windowModel
+     required property QtObject desktop
+ 
++    // Tells which image is this desktop's wallpaper when the desktop window shows another one
++    KWinComponents.DesktopBackground {
++        id: background
++        activity: KWinComponents.Workspace.currentActivity
++        desktop: desktopView.desktop
++        outputName: targetScreen.name
++        visible: false
++    }
++
++    Rectangle {
++        anchors.fill: parent
++        z: -1 // Below every window
++        visible: wallpaperImage.status === Image.Ready
++        color: background.wallpaperColor
++
++        Image {
++            id: wallpaperImage
++            anchors.fill: parent
++            source: background.wallpaper
++            fillMode: background.wallpaperFillMode
++            // These are small; the desktop bar shows one per desktop
++            sourceSize: Qt.size(Math.round(targetScreen.geometry.width / 4), Math.round(targetScreen.geometry.height / 4))
++            asynchronous: true
++            cache: true
++        }
++    }
++
+     Repeater {
+         model: KWinComponents.WindowFilterModel {
+             activity: KWinComponents.Workspace.currentActivity
+@@ -28,7 +55,8 @@ Item {
+             width: model.window.width
+             height: model.window.height
+             z: model.window.stackingOrder
+-            visible: !model.window.minimized
++            // The desktop window gives way to this desktop's own wallpaper
++            visible: !model.window.minimized && !(model.window.desktopWindow && wallpaperImage.status === Image.Ready)
+         }
+     }
+ }
+diff --git a/src/plugins/overview/qml/Main.qml b/src/plugins/overview/qml/Main.qml
+index 209d63131c..19a95efcfc 100644
+--- a/src/plugins/overview/qml/Main.qml
++++ b/src/plugins/overview/qml/Main.qml
+@@ -566,16 +566,38 @@ FocusScope {
+                         anchors.fill: parent
+                         anchors.margins: gridVal !== 0 ? Math.round(mainBackground.current * gridVal * (1.5 / gridScale.xScale)) : 0
+                         activity: KWinComponents.Workspace.currentActivity
+-                        desktop: currentDesktop
++                        // The desktop window is the same for every desktop, but its wallpaper may not be
++                        desktop: mainBackground.desktop
+                         outputName: targetScreen.name
+                         visible: false
+                     }
+ 
++                    // A wallpaper that differs per virtual desktop can't be seen in the desktop
++                    // window unless the desktop is the current one; shown from its image instead.
++                    Rectangle {
++                        id: desktopWallpaper
++                        anchors.fill: desktopElement
++                        visible: false
++                        // Keep showing the window until the image is there, rather than a blank
++                        layer.enabled: wallpaperImage.status === Image.Ready
++                        color: desktopElement.wallpaperColor
++
++                        Image {
++                            id: wallpaperImage
++                            anchors.fill: parent
++                            source: desktopElement.wallpaper
++                            fillMode: desktopElement.wallpaperFillMode
++                            sourceSize: Qt.size(targetScreen.geometry.width, targetScreen.geometry.height)
++                            asynchronous: true
++                            cache: true
++                        }
++                    }
++
+                     Kirigami.ShadowedTexture {
+                         anchors.fill: parent
+ 
+                         color: "transparent"
+-                        source: desktopElement
++                        source: desktopWallpaper.layer.enabled ? desktopWallpaper : desktopElement
+ 
+                         radius: Kirigami.Units.cornerRadius * (overviewVal + gridVal * 2)
+ 
+diff --git a/src/scripting/desktopbackgrounditem.cpp b/src/scripting/desktopbackgrounditem.cpp
+index c774b420cf..d1679d0c3a 100644
+--- a/src/scripting/desktopbackgrounditem.cpp
++++ b/src/scripting/desktopbackgrounditem.cpp
+@@ -22,6 +22,23 @@ namespace KWin
+ DesktopBackgroundItem::DesktopBackgroundItem(QQuickItem *parent)
+     : WindowThumbnailItem(parent)
+ {
++    connect(DesktopWallpapers::self(), &DesktopWallpapers::changed, this, &DesktopBackgroundItem::updateWallpaper);
++    connect(VirtualDesktopManager::self(), &VirtualDesktopManager::currentChanged, this, &DesktopBackgroundItem::updateWallpaper);
++}
++
++QUrl DesktopBackgroundItem::wallpaper() const
++{
++    return m_wallpaper.image;
++}
++
++int DesktopBackgroundItem::wallpaperFillMode() const
++{
++    return m_wallpaper.fillMode;
++}
++
++QColor DesktopBackgroundItem::wallpaperColor() const
++{
++    return m_wallpaper.color;
+ }
+ 
+ void DesktopBackgroundItem::componentComplete()
+@@ -119,6 +136,32 @@ void DesktopBackgroundItem::updateWindow()
+     }
+ 
+     setClient(clientCandidate);
++    updateWallpaper();
++}
++
++void DesktopBackgroundItem::updateWallpaper()
++{
++    if (!isComponentComplete()) {
++        return;
++    }
++
++    // The desktop window shows the wallpaper of the current desktop. Asked for another
++    // desktop, say which image belongs there, if one is known.
++    DesktopWallpapers::Wallpaper wallpaper;
++    if (m_output && m_desktop && m_desktop != VirtualDesktopManager::self()->currentDesktop(m_output)) {
++        QString activity = m_activity;
++#if KWIN_BUILD_ACTIVITIES
++        if (activity.isEmpty() && Workspace::self()->activities()) {
++            activity = Workspace::self()->activities()->current();
++        }
++#endif
++        wallpaper = DesktopWallpapers::self()->wallpaper(m_output, m_desktop, activity);
++    }
++
++    if (m_wallpaper.image != wallpaper.image || m_wallpaper.fillMode != wallpaper.fillMode || m_wallpaper.color != wallpaper.color) {
++        m_wallpaper = wallpaper;
++        Q_EMIT wallpaperChanged();
++    }
+ }
+ 
+ } // namespace KWin
+diff --git a/src/scripting/desktopbackgrounditem.h b/src/scripting/desktopbackgrounditem.h
+index c5cb6f7711..44403f0782 100644
+--- a/src/scripting/desktopbackgrounditem.h
++++ b/src/scripting/desktopbackgrounditem.h
+@@ -6,6 +6,7 @@
+ 
+ #pragma once
+ 
++#include "desktopwallpapers.h"
+ #include "windowthumbnailitem.h"
+ 
+ namespace KWin
+@@ -57,9 +58,34 @@ class DesktopBackgroundItem : public WindowThumbnailItem
+      */
+     Q_PROPERTY(KWin::VirtualDesktop *desktop READ desktop WRITE setDesktop NOTIFY desktopChanged)
+ 
++    /*!
++     * \qmlproperty url DesktopBackground::wallpaper
++     *
++     * The image that is the wallpaper of the given virtual desktop, if it is not what the desktop
++     * window shows. That is the case with wallpapers that differ per virtual desktop: there is a
++     * single desktop window, showing the wallpaper of the current desktop. Empty otherwise.
++     */
++    Q_PROPERTY(QUrl wallpaper READ wallpaper NOTIFY wallpaperChanged)
++    /*!
++     * \qmlproperty int DesktopBackground::wallpaperFillMode
++     *
++     * The Image.fillMode to show the wallpaper with.
++     */
++    Q_PROPERTY(int wallpaperFillMode READ wallpaperFillMode NOTIFY wallpaperChanged)
++    /*!
++     * \qmlproperty color DesktopBackground::wallpaperColor
++     *
++     * The color behind a wallpaper that doesn't cover the screen.
++     */
++    Q_PROPERTY(QColor wallpaperColor READ wallpaperColor NOTIFY wallpaperChanged)
++
+ public:
+     explicit DesktopBackgroundItem(QQuickItem *parent = nullptr);
+ 
++    QUrl wallpaper() const;
++    int wallpaperFillMode() const;
++    QColor wallpaperColor() const;
++
+     void componentComplete() override;
+ 
+     QString outputName() const;
+@@ -78,9 +104,13 @@ Q_SIGNALS:
+     void outputChanged();
+     void desktopChanged();
+     void activityChanged();
++    void wallpaperChanged();
+ 
+ private:
+     void updateWindow();
++    void updateWallpaper();
++
++    DesktopWallpapers::Wallpaper m_wallpaper;
+ 
+     LogicalOutput *m_output = nullptr;
+     VirtualDesktop *m_desktop = nullptr;
+diff --git a/src/scripting/desktopwallpapers.cpp b/src/scripting/desktopwallpapers.cpp
+new file mode 100644
+index 0000000000..d2d10ba9ee
+--- /dev/null
++++ b/src/scripting/desktopwallpapers.cpp
+@@ -0,0 +1,119 @@
++/*
++    SPDX-FileCopyrightText: 2026 sneezeparty <38020091+sneezeparty@users.noreply.github.com>
++
++    SPDX-License-Identifier: GPL-2.0-or-later
++*/
++
++#include "desktopwallpapers.h"
++#include "core/output.h"
++#include "virtualdesktops.h"
++#include "workspace.h"
++
++#include <KConfig>
++#include <KConfigGroup>
++
++#include <QFileInfo>
++#include <QStandardPaths>
++
++namespace KWin
++{
++
++static const QString s_perDesktopPlugin = QStringLiteral("com.github.sneezeparty.desktopwallpapers");
++
++static QString configDir()
++{
++    return QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);
++}
++
++static QString appletsrc()
++{
++    return configDir() + QStringLiteral("/plasma-org.kde.plasma.desktop-appletsrc");
++}
++
++DesktopWallpapers *DesktopWallpapers::self()
++{
++    static DesktopWallpapers *s_self = new DesktopWallpapers();
++    return s_self;
++}
++
++DesktopWallpapers::DesktopWallpapers()
++{
++    // The file is rewritten, not edited in place, and often several times in a row.
++    m_reloadTimer.setSingleShot(true);
++    m_reloadTimer.setInterval(250);
++    connect(&m_reloadTimer, &QTimer::timeout, this, &DesktopWallpapers::reload);
++    connect(&m_watcher, &QFileSystemWatcher::fileChanged, &m_reloadTimer, qOverload<>(&QTimer::start));
++    connect(&m_watcher, &QFileSystemWatcher::directoryChanged, &m_reloadTimer, qOverload<>(&QTimer::start));
++    m_watcher.addPath(configDir());
++    connect(workspace(), &Workspace::outputOrderChanged, this, &DesktopWallpapers::changed);
++    reload();
++}
++
++void DesktopWallpapers::reload()
++{
++    // A file that was replaced has to be added again.
++    if (QFileInfo::exists(appletsrc()) && !m_watcher.files().contains(appletsrc())) {
++        m_watcher.addPath(appletsrc());
++    }
++
++    QList<Screen> screens;
++    const KConfig config(appletsrc(), KConfig::SimpleConfig);
++    const KConfigGroup containments = config.group(QStringLiteral("Containments"));
++    const auto ids = containments.groupList();
++    for (const QString &id : ids) {
++        const KConfigGroup containment = containments.group(id);
++        if (containment.readEntry("wallpaperplugin", QString()) != s_perDesktopPlugin) {
++            continue;
++        }
++        // Desktops belong to an activity; panels carry the same keys but have none.
++        Screen screen;
++        screen.activity = containment.readEntry("activityId", QString());
++        screen.index = containment.readEntry("lastScreen", -1);
++        if (screen.activity.isEmpty() || screen.index < 0) {
++            continue;
++        }
++
++        const KConfigGroup general = containment.group(QStringLiteral("Wallpaper")).group(s_perDesktopPlugin).group(QStringLiteral("General"));
++        screen.fillMode = general.readEntry("FillMode", 2);
++        const QStringList color = general.readEntry("Color", QStringList());
++        if (color.size() >= 3) {
++            screen.color = QColor(color[0].toInt(), color[1].toInt(), color[2].toInt());
++        }
++        const auto entries = general.readEntry("CurrentImages", QStringList());
++        for (const QString &entry : entries) {
++            const qsizetype at = entry.indexOf(QLatin1Char('='));
++            if (at > 0) {
++                screen.images.insert(entry.left(at), QUrl(entry.mid(at + 1)));
++            }
++        }
++        screens.append(screen);
++    }
++
++    m_screens = screens;
++    Q_EMIT changed();
++}
++
++DesktopWallpapers::Wallpaper DesktopWallpapers::wallpaper(const LogicalOutput *output, const VirtualDesktop *desktop, const QString &activity) const
++{
++    if (!output || !desktop) {
++        return Wallpaper();
++    }
++
++    // Plasma numbers the screens in the order of the outputs' priority.
++    const int index = workspace()->outputOrder().indexOf(const_cast<LogicalOutput *>(output));
++    for (const Screen &screen : m_screens) {
++        if (screen.index != index || (!activity.isEmpty() && screen.activity != activity)) {
++            continue;
++        }
++        return Wallpaper{
++            .image = screen.images.value(desktop->id()),
++            .fillMode = screen.fillMode,
++            .color = screen.color,
++        };
++    }
++    return Wallpaper();
++}
++
++} // namespace KWin
++
++#include "moc_desktopwallpapers.cpp"
+diff --git a/src/scripting/desktopwallpapers.h b/src/scripting/desktopwallpapers.h
+new file mode 100644
+index 0000000000..c9de27cd5d
+--- /dev/null
++++ b/src/scripting/desktopwallpapers.h
+@@ -0,0 +1,71 @@
++/*
++    SPDX-FileCopyrightText: 2026 sneezeparty <38020091+sneezeparty@users.noreply.github.com>
++
++    SPDX-License-Identifier: GPL-2.0-or-later
++*/
++
++#pragma once
++
++#include <QColor>
++#include <QFileSystemWatcher>
++#include <QHash>
++#include <QObject>
++#include <QTimer>
++#include <QUrl>
++
++namespace KWin
++{
++
++class LogicalOutput;
++class VirtualDesktop;
++
++/**
++ * Knows the wallpaper of each virtual desktop on each output, for wallpapers that
++ * differ per virtual desktop.
++ *
++ * The desktop background is a single window that is on all virtual desktops, so
++ * such a wallpaper can only be seen in it for the current desktop. Whatever shows
++ * another desktop's background has to draw the image itself; this reads which one
++ * from the configuration of Plasma's desktop containments.
++ */
++class DesktopWallpapers : public QObject
++{
++    Q_OBJECT
++
++public:
++    struct Wallpaper {
++        QUrl image;
++        int fillMode = 2; // QQuickImage::PreserveAspectCrop
++        QColor color = Qt::black;
++
++        bool isValid() const
++        {
++            return !image.isEmpty();
++        }
++    };
++
++    static DesktopWallpapers *self();
++
++    Wallpaper wallpaper(const LogicalOutput *output, const VirtualDesktop *desktop, const QString &activity) const;
++
++Q_SIGNALS:
++    void changed();
++
++private:
++    explicit DesktopWallpapers();
++    void reload();
++
++    struct Screen {
++        int index = -1; // Plasma's number for the screen, the position in the output order
++        QString activity;
++        QHash<QString, QUrl> images; // by virtual desktop id
++        int fillMode = 2;
++        QColor color = Qt::black;
++    };
++
++    QList<Screen> m_screens;
++    QFileSystemWatcher m_watcher;
++    QTimer m_reloadTimer;
++};
++
++} // namespace KWin

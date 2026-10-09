@@ -1,0 +1,74 @@
+From f6d1e3093ff501585be14752478da6acbe1ba972 Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 17:57:56 -0700
+Subject: [PATCH 1/4] screencast: Add stream_window_scaled and stream_desktop
+
+Version 7 of zkde_screencast_unstable_v1. Both requests take a maximum buffer size so that thumbnails don't have to be captured at native resolution.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ src/protocols/zkde-screencast-unstable-v1.xml | 42 ++++++++++++++++++-
+ 1 file changed, 40 insertions(+), 2 deletions(-)
+
+diff --git a/src/protocols/zkde-screencast-unstable-v1.xml b/src/protocols/zkde-screencast-unstable-v1.xml
+index aa32a91..48a3f07 100644
+--- a/src/protocols/zkde-screencast-unstable-v1.xml
++++ b/src/protocols/zkde-screencast-unstable-v1.xml
+@@ -5,7 +5,7 @@
+ 
+     SPDX-License-Identifier: LGPL-2.1-or-later
+   ]]></copyright>
+-    <interface name="zkde_screencast_unstable_v1" version="6">
++    <interface name="zkde_screencast_unstable_v1" version="7">
+         <description summary="Protocol for managing PipeWire feeds of the different displays and windows">
+             Warning! The protocol described in this file is a desktop environment
+             implementation detail. Regular clients must not use this protocol.
+@@ -74,9 +74,47 @@
+             <arg name="scale" type="fixed" summary="Scaling factor of the display where it's to be displayed"/>
+             <arg name="pointer" type="uint" summary="Requested pointer mode"/>
+         </request>
++
++        <request name="stream_window_scaled" since="7">
++            <description summary="requests a downscaled feed from a window">
++                Like stream_window, but the stream is scaled down so that its
++                buffers fit inside a box of the given size, preserving the
++                aspect ratio of the window. The stream is never scaled up
++                beyond the native resolution of the window, and it follows
++                the window as it is resized.
++
++                This is meant for thumbnails and previews, where capturing
++                the window at its native resolution wastes memory. The
++                compositor may clamp the requested size.
++            </description>
++            <arg name="stream" type="new_id" interface="zkde_screencast_stream_unstable_v1"/>
++            <arg name="window_uuid" type="string" summary="window Identifier"/>
++            <arg name="width" type="uint" summary="Maximum buffer width in pixels"/>
++            <arg name="height" type="uint" summary="Maximum buffer height in pixels"/>
++            <arg name="pointer" type="uint" summary="Requested pointer mode"/>
++        </request>
++
++        <request name="stream_desktop" since="7">
++            <description summary="requests a downscaled feed from a virtual desktop">
++                Requests a feed showing the windows of the given virtual
++                desktop, whether or not that desktop is currently shown.
++
++                If an output is given, the feed is limited to that output,
++                otherwise it covers the whole workspace. The stream is
++                scaled down so that its buffers fit inside a box of the
++                given size, preserving the aspect ratio. The compositor may
++                clamp the requested size.
++            </description>
++            <arg name="stream" type="new_id" interface="zkde_screencast_stream_unstable_v1"/>
++            <arg name="desktop_id" type="string" summary="virtual desktop Identifier"/>
++            <arg name="output" type="object" interface="wl_output" allow-null="true"/>
++            <arg name="width" type="uint" summary="Maximum buffer width in pixels"/>
++            <arg name="height" type="uint" summary="Maximum buffer height in pixels"/>
++            <arg name="pointer" type="uint" summary="Requested pointer mode"/>
++        </request>
+     </interface>
+ 
+-    <interface name="zkde_screencast_stream_unstable_v1" version="6">
++    <interface name="zkde_screencast_stream_unstable_v1" version="7">
+         <request name="close" type="destructor">
+             <description summary="Indicates we are done with the stream and the communication is over."/>
+         </request>

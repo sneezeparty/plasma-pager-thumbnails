@@ -1,0 +1,376 @@
+From f722b37f7582c4f51e175f51e97e8559fcbe0c15 Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 07:49:21 -0700
+Subject: [PATCH 6/8] plugins/screencast: Only repaint desktop streams for
+ their own windows
+
+A desktop stream painted again for every change to any window on any
+desktop. It now does so only when the windows it shows, or one of them,
+changed. Short-lived windows that are on every desktop (notifications,
+on-screen displays, applet popups) and windows hidden by "show desktop"
+are left out.
+
+The windows are no longer watched, and so no longer kept drawing, while
+the screens are off. With several screens the stream is not held back
+for a fullscreen window anymore, since whoever shows it may be on
+another screen; the pager pauses its streams itself when it is covered.
+
+The wallpaper lookup only reads the applets file again when that file
+changed. A stream_desktop request for an output that is gone fails
+rather than falling back to the whole workspace, and oversized sizes
+are clamped.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ .../screencast/desktopscreencastsource.cpp    | 101 +++++++++++++-----
+ .../screencast/desktopscreencastsource.h      |  10 +-
+ src/scripting/desktopwallpapers.cpp           |  26 ++++-
+ src/scripting/desktopwallpapers.h             |   3 +
+ src/wayland/screencast_v1.cpp                 |  23 +++-
+ 5 files changed, 129 insertions(+), 34 deletions(-)
+
+diff --git a/src/plugins/screencast/desktopscreencastsource.cpp b/src/plugins/screencast/desktopscreencastsource.cpp
+index 3c1e9d6e18..9ea362ab4f 100644
+--- a/src/plugins/screencast/desktopscreencastsource.cpp
++++ b/src/plugins/screencast/desktopscreencastsource.cpp
+@@ -55,15 +55,21 @@ DesktopScreenCastSource::DesktopScreenCastSource(VirtualDesktop *desktop, Logica
+     });
+     connect(workspace(), &Workspace::stackingOrderChanged, this, &DesktopScreenCastSource::updateWindows);
+     connect(workspace(), &Workspace::currentActivityChanged, this, &DesktopScreenCastSource::updateWindows);
+-    connect(workspace(), &Workspace::geometryChanged, this, &DesktopScreenCastSource::updateWindows);
++    connect(workspace(), &Workspace::geometryChanged, this, [this]() {
++        updateWindows();
++        scheduleFrame();
++    });
+     connect(waylandServer(), &WaylandServer::lockStateChanged, this, &DesktopScreenCastSource::updateWindows);
+-    connect(workspace(), &Workspace::windowActivated, this, &DesktopScreenCastSource::scheduleFrame);
++    connect(workspace(), &Workspace::windowActivated, this, &DesktopScreenCastSource::updateSuspended);
++    connect(workspace(), &Workspace::outputsChanged, this, &DesktopScreenCastSource::updateSuspended);
++    connect(workspace(), &Workspace::dpmsStateChanged, this, &DesktopScreenCastSource::updateSuspended);
+ 
+     const auto windows = workspace()->windows();
+     for (Window *window : windows) {
+         track(window);
+     }
+     updateWindows();
++    updateSuspended();
+ }
+ 
+ DesktopScreenCastSource::~DesktopScreenCastSource()
+@@ -83,7 +89,7 @@ void DesktopScreenCastSource::track(Window *window)
+ {
+     connect(window, &Window::closed, this, [this, window] {
+         if (m_windows.removeOne(window)) {
+-            if (m_active) {
++            if (m_watching) {
+                 unwatch(window);
+                 scheduleFrame();
+             }
+@@ -95,8 +101,15 @@ void DesktopScreenCastSource::track(Window *window)
+     connect(window, &Window::hiddenChanged, this, &DesktopScreenCastSource::updateWindows);
+     connect(window, &Window::readyForPaintingChanged, this, &DesktopScreenCastSource::updateWindows);
+     connect(window, &Window::excludeFromCaptureChanged, this, &DesktopScreenCastSource::updateWindows);
+-    connect(window, &Window::frameGeometryChanged, this, &DesktopScreenCastSource::updateWindows);
+-    connect(window, &Window::fullScreenChanged, this, &DesktopScreenCastSource::scheduleFrame);
++    connect(window, &Window::hiddenByShowDesktopChanged, this, &DesktopScreenCastSource::updateWindows);
++    connect(window, &Window::frameGeometryChanged, this, [this, window]() {
++        // It may have moved in or out of the area that is shown. If it is one of ours and
++        // stayed, it only moved; a window of another desktop is none of our business.
++        if (!updateWindows() && m_windows.contains(window)) {
++            scheduleFrame();
++        }
++    });
++    connect(window, &Window::fullScreenChanged, this, &DesktopScreenCastSource::updateSuspended);
+ }
+ 
+ bool DesktopScreenCastSource::accepts(const Window *window) const
+@@ -104,7 +117,7 @@ bool DesktopScreenCastSource::accepts(const Window *window) const
+     if (!m_desktop || window->isDeleted() || !window->readyForPainting() || !window->windowItem()) {
+         return false;
+     }
+-    if (window->isMinimized() || window->isHidden() || window->excludeFromCapture()) {
++    if (window->isMinimized() || window->isHidden() || window->isHiddenByShowDesktop() || window->excludeFromCapture()) {
+         return false;
+     }
+     // Panels are on every desktop and typically are where the stream ends up being
+@@ -113,6 +126,11 @@ bool DesktopScreenCastSource::accepts(const Window *window) const
+     if (window->isDock()) {
+         return false;
+     }
++    // The same goes for the short-lived things that show up on every desktop at once.
++    // They can hardly be made out at this size anyway.
++    if (window->isNotification() || window->isCriticalNotification() || window->isOnScreenDisplay() || window->isAppletPopup()) {
++        return false;
++    }
+     // The consumer draws the background itself, for instance because it knows a
+     // different wallpaper for each desktop while there is only one desktop window.
+     if (m_excludeBackground && window->isDesktop()) {
+@@ -124,10 +142,10 @@ bool DesktopScreenCastSource::accepts(const Window *window) const
+     return window->visibleGeometry().intersects(boundingRect());
+ }
+ 
+-void DesktopScreenCastSource::updateWindows()
++bool DesktopScreenCastSource::updateWindows()
+ {
+     if (m_closed) {
+-        return;
++        return false;
+     }
+ 
+     QList<Window *> windows;
+@@ -140,7 +158,13 @@ void DesktopScreenCastSource::updateWindows()
+         }
+     }
+ 
+-    if (m_active) {
++    // This is called for changes to any window on any desktop. Most don't concern
++    // this desktop, and then there is nothing to paint again.
++    if (windows == m_windows) {
++        return false;
++    }
++
++    if (m_watching) {
+         for (Window *window : std::as_const(windows)) {
+             if (!m_windows.contains(window)) {
+                 watch(window);
+@@ -155,19 +179,52 @@ void DesktopScreenCastSource::updateWindows()
+     m_windows = windows;
+ 
+     scheduleFrame();
++    return true;
+ }
+ 
+ bool DesktopScreenCastSource::isHeldBack() const
+ {
+-    // Stay out of the way of games and videos. Whoever shows the stream is most
+-    // likely covered by the fullscreen window anyway.
++    // Stay out of the way of games and videos. With a single screen, whoever shows the
++    // stream is covered by the fullscreen window. With more of them it may well be on
++    // another one, and has to pause the stream itself when it can't be seen.
+     const Window *active = workspace()->activeWindow();
+-    return active && active->isFullScreen();
++    return active && active->isFullScreen() && workspace()->outputs().size() == 1;
++}
++
++void DesktopScreenCastSource::updateSuspended()
++{
++    // Nobody is looking with the screens off either
++    const bool suspended = isHeldBack() || workspace()->dpmsState() != Workspace::DpmsState::On;
++    if (m_suspended != suspended) {
++        m_suspended = suspended;
++        setWatching(m_active && !m_suspended);
++    }
++}
++
++void DesktopScreenCastSource::setWatching(bool watching)
++{
++    if (m_watching == watching) {
++        return;
++    }
++
++    // While not watching, the windows are left alone: those that can't be seen get
++    // no frame callbacks on our account and are free to stop drawing.
++    m_watching = watching;
++    for (Window *window : std::as_const(m_windows)) {
++        if (watching) {
++            watch(window);
++        } else {
++            unwatch(window);
++        }
++    }
++    if (watching) {
++        Q_EMIT frame();
++    }
+ }
+ 
+ void DesktopScreenCastSource::scheduleFrame()
+ {
+-    if (m_active && !isHeldBack()) {
++    if (m_watching) {
+         Q_EMIT frame();
+     }
+ }
+@@ -302,14 +359,8 @@ std::chrono::nanoseconds DesktopScreenCastSource::clock() const
+ 
+ void DesktopScreenCastSource::pause()
+ {
+-    if (!m_active) {
+-        return;
+-    }
+-
+-    for (Window *window : std::as_const(m_windows)) {
+-        unwatch(window);
+-    }
+     m_active = false;
++    setWatching(false);
+ }
+ 
+ void DesktopScreenCastSource::resume()
+@@ -318,12 +369,12 @@ void DesktopScreenCastSource::resume()
+         return;
+     }
+ 
+-    for (Window *window : std::as_const(m_windows)) {
+-        watch(window);
+-    }
+     m_active = true;
+-
+-    Q_EMIT frame();
++    setWatching(!m_suspended);
++    if (!m_watching) {
++        // Something to show until we are watching again
++        Q_EMIT frame();
++    }
+ }
+ 
+ bool DesktopScreenCastSource::includesCursor(Cursor *cursor) const
+diff --git a/src/plugins/screencast/desktopscreencastsource.h b/src/plugins/screencast/desktopscreencastsource.h
+index 854962e5fe..4723296956 100644
+--- a/src/plugins/screencast/desktopscreencastsource.h
++++ b/src/plugins/screencast/desktopscreencastsource.h
+@@ -61,7 +61,10 @@ private:
+     void track(Window *window);
+     void watch(Window *window);
+     void unwatch(Window *window);
+-    void updateWindows();
++    /// Returns whether the windows to show changed
++    bool updateWindows();
++    void updateSuspended();
++    void setWatching(bool watching);
+     void scheduleFrame();
+     bool isHeldBack() const;
+     bool accepts(const Window *window) const;
+@@ -78,7 +81,12 @@ private:
+     QList<Window *> m_windows;
+     std::chrono::nanoseconds m_last{0};
+     bool m_closed = false;
++    // The stream is running
+     bool m_active = false;
++    // Nobody can see it at the moment
++    bool m_suspended = false;
++    // m_active && !m_suspended: following what the windows in m_windows do
++    bool m_watching = false;
+     bool m_renderCursor = false;
+ };
+ 
+diff --git a/src/scripting/desktopwallpapers.cpp b/src/scripting/desktopwallpapers.cpp
+index d2d10ba9ee..ad65cf4c49 100644
+--- a/src/scripting/desktopwallpapers.cpp
++++ b/src/scripting/desktopwallpapers.cpp
+@@ -12,6 +12,7 @@
+ #include <KConfig>
+ #include <KConfigGroup>
+ 
++#include <QDateTime>
+ #include <QFileInfo>
+ #include <QStandardPaths>
+ 
+@@ -42,8 +43,15 @@ DesktopWallpapers::DesktopWallpapers()
+     m_reloadTimer.setSingleShot(true);
+     m_reloadTimer.setInterval(250);
+     connect(&m_reloadTimer, &QTimer::timeout, this, &DesktopWallpapers::reload);
+-    connect(&m_watcher, &QFileSystemWatcher::fileChanged, &m_reloadTimer, qOverload<>(&QTimer::start));
+-    connect(&m_watcher, &QFileSystemWatcher::directoryChanged, &m_reloadTimer, qOverload<>(&QTimer::start));
++    // The timer is left to run out rather than restarted, so that a busy directory
++    // can't put a reload off forever.
++    const auto schedule = [this]() {
++        if (!m_reloadTimer.isActive()) {
++            m_reloadTimer.start();
++        }
++    };
++    connect(&m_watcher, &QFileSystemWatcher::fileChanged, this, schedule);
++    connect(&m_watcher, &QFileSystemWatcher::directoryChanged, this, schedule);
+     m_watcher.addPath(configDir());
+     connect(workspace(), &Workspace::outputOrderChanged, this, &DesktopWallpapers::changed);
+     reload();
+@@ -56,6 +64,14 @@ void DesktopWallpapers::reload()
+         m_watcher.addPath(appletsrc());
+     }
+ 
++    // Every program that saves its settings changes the directory; only this file matters.
++    const QFileInfo info(appletsrc());
++    const QString fingerprint = QString::number(info.lastModified().toMSecsSinceEpoch()) + QLatin1Char(':') + QString::number(info.size());
++    if (fingerprint == m_fingerprint) {
++        return;
++    }
++    m_fingerprint = fingerprint;
++
+     QList<Screen> screens;
+     const KConfig config(appletsrc(), KConfig::SimpleConfig);
+     const KConfigGroup containments = config.group(QStringLiteral("Containments"));
+@@ -89,8 +105,10 @@ void DesktopWallpapers::reload()
+         screens.append(screen);
+     }
+ 
+-    m_screens = screens;
+-    Q_EMIT changed();
++    if (m_screens != screens) {
++        m_screens = screens;
++        Q_EMIT changed();
++    }
+ }
+ 
+ DesktopWallpapers::Wallpaper DesktopWallpapers::wallpaper(const LogicalOutput *output, const VirtualDesktop *desktop, const QString &activity) const
+diff --git a/src/scripting/desktopwallpapers.h b/src/scripting/desktopwallpapers.h
+index c9de27cd5d..b3b431ac9f 100644
+--- a/src/scripting/desktopwallpapers.h
++++ b/src/scripting/desktopwallpapers.h
+@@ -61,9 +61,12 @@ private:
+         QHash<QString, QUrl> images; // by virtual desktop id
+         int fillMode = 2;
+         QColor color = Qt::black;
++
++        bool operator==(const Screen &other) const = default;
+     };
+ 
+     QList<Screen> m_screens;
++    QString m_fingerprint;
+     QFileSystemWatcher m_watcher;
+     QTimer m_reloadTimer;
+ };
+diff --git a/src/wayland/screencast_v1.cpp b/src/wayland/screencast_v1.cpp
+index e281fe1cfd..08608b7488 100644
+--- a/src/wayland/screencast_v1.cpp
++++ b/src/wayland/screencast_v1.cpp
+@@ -11,6 +11,8 @@
+ 
+ #include <QDebug>
+ 
++#include <limits>
++
+ #include "qwayland-server-zkde-screencast-unstable-v1.h"
+ 
+ namespace KWin
+@@ -111,15 +113,28 @@ public:
+ 
+     void zkde_screencast_unstable_v1_stream_window_scaled(Resource *resource, uint32_t streamid, const QString &uuid, uint32_t width, uint32_t height, uint32_t pointer) override
+     {
+-        Q_EMIT q->windowScreencastRequested(createStream(resource, streamid), uuid, QSize(width, height), ScreencastV1Interface::CursorMode(pointer));
++        // Zero is refused later on; anything larger than a size can hold is as good as the largest one
++        static const uint32_t s_max = std::numeric_limits<int16_t>::max();
++        Q_EMIT q->windowScreencastRequested(createStream(resource, streamid), uuid, QSize(std::min(width, s_max), std::min(height, s_max)), ScreencastV1Interface::CursorMode(pointer));
+     }
+ 
+     void zkde_screencast_unstable_v1_stream_desktop(Resource *resource, uint32_t streamid, const QString &desktopId, struct ::wl_resource *output, uint32_t width, uint32_t height, uint32_t flags, uint32_t pointer) override
+     {
+-        Q_EMIT q->desktopScreencastRequested(createStream(resource, streamid),
++        auto stream = createStream(resource, streamid);
++        OutputInterface *outputInterface = nullptr;
++        if (output) {
++            // No output stands for the whole workspace, an output that is gone doesn't
++            outputInterface = OutputInterface::get(output);
++            if (!outputInterface) {
++                stream->sendFailed(QStringLiteral("Could not find output"));
++                return;
++            }
++        }
++        static const uint32_t s_max = std::numeric_limits<int16_t>::max();
++        Q_EMIT q->desktopScreencastRequested(stream,
+                                              desktopId,
+-                                             output ? OutputInterface::get(output) : nullptr,
+-                                             QSize(width, height),
++                                             outputInterface,
++                                             QSize(std::min(width, s_max), std::min(height, s_max)),
+                                              flags & desktop_flags_exclude_background,
+                                              ScreencastV1Interface::CursorMode(pointer));
+     }

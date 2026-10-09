@@ -1,0 +1,96 @@
+From d29cd7f1ae5190d704dabb13e2391eb4bdaf6257 Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 10:24:11 -0700
+Subject: [PATCH 6/7] applets/pager: Add a setting for how often other
+ desktops' thumbnails update
+
+1 to 30 times per second, 1 by default.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ applets/pager/main.xml              |  6 ++++++
+ applets/pager/qml/configGeneral.qml | 27 +++++++++++++++++++++++++++
+ applets/pager/qml/main.qml          |  1 +
+ 3 files changed, 34 insertions(+)
+
+diff --git a/applets/pager/main.xml b/applets/pager/main.xml
+index 5979bbd84e..64e69425ad 100644
+--- a/applets/pager/main.xml
++++ b/applets/pager/main.xml
+@@ -27,6 +27,12 @@
+       <label>Whether to show live thumbnails of the virtual desktops.</label>
+       <default>false</default>
+     </entry>
++    <entry name="hiddenDesktopRefreshRate" type="Int">
++      <label>How many times a second the live thumbnails of desktops that are not shown are updated.</label>
++      <default>1</default>
++      <min>1</min>
++      <max>30</max>
++    </entry>
+     <entry name="showWallpaper" type="Bool">
+       <label>Whether to show the wallpaper of each virtual desktop.</label>
+       <default>true</default>
+diff --git a/applets/pager/qml/configGeneral.qml b/applets/pager/qml/configGeneral.qml
+index 369a0c8852..9f2608270d 100644
+--- a/applets/pager/qml/configGeneral.qml
++++ b/applets/pager/qml/configGeneral.qml
+@@ -7,6 +7,7 @@
+ 
+ import QtQuick
+ import QtQuick.Controls as QQC2
++import QtQuick.Layouts
+ 
+ import org.kde.kirigami as Kirigami
+ import org.kde.plasma.plasmoid
+@@ -23,6 +24,7 @@ KCM.SimpleKCM {
+     property alias cfg_pagerLayout: pagerLayout.currentIndex
+     property bool cfg_showThumbnails
+     property alias cfg_showWallpaper: showWallpaper.checked
++    property alias cfg_hiddenDesktopRefreshRate: hiddenDesktopRefreshRate.value
+     property alias cfg_showOutlinesOverThumbnails: showOutlinesOverThumbnails.checked
+     property alias cfg_showOnlyCurrentScreen: showOnlyCurrentScreen.checked
+     property alias cfg_wrapPage: wrapPage.checked
+@@ -63,6 +65,31 @@ KCM.SimpleKCM {
+             text: i18nc("@option:check", "Show each desktop's wallpaper") // qmllint disable unqualified
+         }
+ 
++        RowLayout {
++            Kirigami.FormData.label: i18nc("@label:spinbox how often thumbnails are updated", "Update other desktops:") // qmllint disable unqualified
++            visible: !root.isActivityPager && root.cfg_showThumbnails
++            spacing: Kirigami.Units.smallSpacing
++
++            QQC2.SpinBox {
++                id: hiddenDesktopRefreshRate
++                from: 1
++                to: 30
++            }
++
++            QQC2.Label {
++                text: i18ncp("@label after a spinbox, 'Update other desktops: N times per second'", "time per second", "times per second", hiddenDesktopRefreshRate.value) // qmllint disable unqualified
++            }
++        }
++
++        QQC2.Label {
++            Layout.maximumWidth: Kirigami.Units.gridUnit * 22
++            visible: !root.isActivityPager && root.cfg_showThumbnails
++            wrapMode: Text.Wrap
++            font: Kirigami.Theme.smallFont
++            opacity: 0.7
++            text: i18nc("@info", "The desktop you are on is always updated as it changes. Updating the others more often makes the programs on them do more work.") // qmllint disable unqualified
++        }
++
+         Item {
+             Kirigami.FormData.isSection: true
+             visible: !root.isActivityPager
+diff --git a/applets/pager/qml/main.qml b/applets/pager/qml/main.qml
+index 78b9c4c987..a5864c0322 100644
+--- a/applets/pager/qml/main.qml
++++ b/applets/pager/qml/main.qml
+@@ -578,6 +578,7 @@ PlasmoidItem {
+                                                  Math.ceil(clipRect.height * root.Screen.devicePixelRatio))
+                                 // With the wallpaper drawn above, the stream only has to bring the windows
+                                 excludeBackground: wallpaperLayer.active
++                                hiddenRefreshRate: Plasmoid.configuration.hiddenDesktopRefreshRate
+                             }
+                         }
+                     }

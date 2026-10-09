@@ -1,0 +1,47 @@
+From f57b0371c7d6edc59b95e8dd7f8ce50023fcf71e Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 06:04:35 -0700
+Subject: [PATCH 2/4] screencast: Let stream_desktop leave out the desktop
+ background
+
+Adds a flags argument. Desktop streams always carry an alpha channel.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ src/protocols/zkde-screencast-unstable-v1.xml | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/protocols/zkde-screencast-unstable-v1.xml b/src/protocols/zkde-screencast-unstable-v1.xml
+index 48a3f07..739f6b9 100644
+--- a/src/protocols/zkde-screencast-unstable-v1.xml
++++ b/src/protocols/zkde-screencast-unstable-v1.xml
+@@ -94,6 +94,11 @@
+             <arg name="pointer" type="uint" summary="Requested pointer mode"/>
+         </request>
+ 
++        <enum name="desktop_flags" since="7" bitfield="true">
++            <description summary="Options for stream_desktop" />
++            <entry name="exclude_background" value="1" summary="Leave out the desktop background, so that only the windows are shown on a transparent buffer"/>
++        </enum>
++
+         <request name="stream_desktop" since="7">
+             <description summary="requests a downscaled feed from a virtual desktop">
+                 Requests a feed showing the windows of the given virtual
+@@ -104,12 +109,17 @@
+                 scaled down so that its buffers fit inside a box of the
+                 given size, preserving the aspect ratio. The compositor may
+                 clamp the requested size.
++
++                The buffers of this stream have an alpha channel: areas that
++                no output covers are transparent, and so is everything but
++                the windows if exclude_background is set.
+             </description>
+             <arg name="stream" type="new_id" interface="zkde_screencast_stream_unstable_v1"/>
+             <arg name="desktop_id" type="string" summary="virtual desktop Identifier"/>
+             <arg name="output" type="object" interface="wl_output" allow-null="true"/>
+             <arg name="width" type="uint" summary="Maximum buffer width in pixels"/>
+             <arg name="height" type="uint" summary="Maximum buffer height in pixels"/>
++            <arg name="flags" type="uint" enum="desktop_flags" summary="Options"/>
+             <arg name="pointer" type="uint" summary="Requested pointer mode"/>
+         </request>
+     </interface>

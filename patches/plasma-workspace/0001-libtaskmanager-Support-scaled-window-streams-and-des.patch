@@ -1,0 +1,300 @@
+From fc75885234eac71e9dfbb431ddd14bcb00dd5808 Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 17:57:56 -0700
+Subject: [PATCH 1/4] libtaskmanager: Support scaled window streams and desktop
+ streams
+
+ScreencastingRequest gains desktopId and maxSize.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ libtaskmanager/screencasting.cpp        | 53 ++++++++++++++--
+ libtaskmanager/screencasting.h          | 15 +++++
+ libtaskmanager/screencastingrequest.cpp | 82 +++++++++++++++++++++----
+ libtaskmanager/screencastingrequest.h   | 29 +++++++++
+ 4 files changed, 160 insertions(+), 19 deletions(-)
+
+diff --git a/libtaskmanager/screencasting.cpp b/libtaskmanager/screencasting.cpp
+index d165eab61e..c60aeb2384 100644
+--- a/libtaskmanager/screencasting.cpp
++++ b/libtaskmanager/screencasting.cpp
+@@ -39,7 +39,7 @@ void ScreencastingStream::zkde_screencast_stream_unstable_v1_serial(uint32_t obj
+ }
+ 
+ Screencasting::Screencasting()
+-    : QWaylandClientExtensionTemplate<Screencasting>(ZKDE_SCREENCAST_STREAM_UNSTABLE_V1_SERIAL_SINCE_VERSION)
++    : QWaylandClientExtensionTemplate<Screencasting>(ZKDE_SCREENCAST_UNSTABLE_V1_STREAM_DESKTOP_SINCE_VERSION)
+ {
+     initialize();
+ 
+@@ -55,19 +55,24 @@ Screencasting::~Screencasting()
+     }
+ }
+ 
+-std::unique_ptr<ScreencastingStream> Screencasting::createOutputStream(const QString &outputName, pointer mode)
++wl_output *Screencasting::findOutput(const QString &outputName) const
+ {
+-    if (!isActive()) {
+-        return nullptr;
+-    }
+-
+     wl_output *output = nullptr;
+     for (auto screen : qGuiApp->screens()) {
+         if (screen->name() == outputName) {
+             output = (wl_output *)QGuiApplication::platformNativeInterface()->nativeResourceForScreen("output", screen);
+         }
+     }
++    return output;
++}
++
++std::unique_ptr<ScreencastingStream> Screencasting::createOutputStream(const QString &outputName, pointer mode)
++{
++    if (!isActive()) {
++        return nullptr;
++    }
+ 
++    wl_output *output = findOutput(outputName);
+     if (!output) {
+         return nullptr;
+     }
+@@ -88,4 +93,40 @@ std::unique_ptr<ScreencastingStream> Screencasting::createWindowStream(const QSt
+     return stream;
+ }
+ 
++std::unique_ptr<ScreencastingStream> Screencasting::createWindowStream(const QString &uuid, const QSize &maxSize, pointer mode)
++{
++    if (!isActive()) {
++        return nullptr;
++    }
++    if (maxSize.isEmpty() || QtWayland::zkde_screencast_unstable_v1::version() < ZKDE_SCREENCAST_UNSTABLE_V1_STREAM_WINDOW_SCALED_SINCE_VERSION) {
++        return createWindowStream(uuid, mode);
++    }
++    auto stream = std::make_unique<ScreencastingStream>();
++    stream->init(stream_window_scaled(uuid, maxSize.width(), maxSize.height(), mode));
++    return stream;
++}
++
++std::unique_ptr<ScreencastingStream> Screencasting::createDesktopStream(const QString &desktopId, const QString &outputName, const QSize &maxSize, pointer mode)
++{
++    if (!isActive() || maxSize.isEmpty()) {
++        return nullptr;
++    }
++    if (QtWayland::zkde_screencast_unstable_v1::version() < ZKDE_SCREENCAST_UNSTABLE_V1_STREAM_DESKTOP_SINCE_VERSION) {
++        return nullptr;
++    }
++
++    wl_output *output = nullptr;
++    if (!outputName.isEmpty()) {
++        output = findOutput(outputName);
++        if (!output) {
++            return nullptr;
++        }
++    }
++
++    auto stream = std::make_unique<ScreencastingStream>();
++    stream->setObjectName(desktopId);
++    stream->init(stream_desktop(desktopId, output, maxSize.width(), maxSize.height(), mode));
++    return stream;
++}
++
+ #include "moc_screencasting.cpp"
+diff --git a/libtaskmanager/screencasting.h b/libtaskmanager/screencasting.h
+index 5915b060d8..bb3c5c229e 100644
+--- a/libtaskmanager/screencasting.h
++++ b/libtaskmanager/screencasting.h
+@@ -47,4 +47,19 @@ public:
+ 
+     std::unique_ptr<ScreencastingStream> createOutputStream(const QString &outputName, pointer mode);
+     std::unique_ptr<ScreencastingStream> createWindowStream(const QString &uuid, pointer mode);
++    /**
++     * Like createWindowStream(), but the stream is scaled down to fit inside @p maxSize
++     * (in buffer pixels). Falls back to a full size stream on compositors that don't
++     * support scaled window streams.
++     */
++    std::unique_ptr<ScreencastingStream> createWindowStream(const QString &uuid, const QSize &maxSize, pointer mode);
++    /**
++     * Requests a stream showing the virtual desktop @p desktopId, scaled down to fit
++     * inside @p maxSize (in buffer pixels). If @p outputName is empty the stream
++     * covers the whole workspace. Returns nullptr if the compositor doesn't support it.
++     */
++    std::unique_ptr<ScreencastingStream> createDesktopStream(const QString &desktopId, const QString &outputName, const QSize &maxSize, pointer mode);
++
++private:
++    wl_output *findOutput(const QString &outputName) const;
+ };
+diff --git a/libtaskmanager/screencastingrequest.cpp b/libtaskmanager/screencastingrequest.cpp
+index 31312ee6bf..ab42107b75 100644
+--- a/libtaskmanager/screencastingrequest.cpp
++++ b/libtaskmanager/screencastingrequest.cpp
+@@ -37,16 +37,9 @@ void ScreencastingRequest::setUuid(const QString &uuid)
+         return;
+     }
+ 
+-    setStream(nullptr);
+     m_uuid = uuid;
+     Q_EMIT uuidChanged(uuid);
+-
+-    if (!m_uuid.isEmpty()) {
+-        if (!m_screenCasting) {
+-            m_screenCasting = std::make_unique<Screencasting>();
+-        }
+-        setStream(m_screenCasting->createWindowStream(m_uuid, Screencasting::pointer_hidden));
+-    }
++    scheduleUpdate();
+ }
+ 
+ void ScreencastingRequest::resetOutputName()
+@@ -60,14 +53,77 @@ void ScreencastingRequest::setOutputName(const QString &outputName)
+         return;
+     }
+ 
+-    setStream(nullptr);
+     m_outputName = outputName;
+     Q_EMIT outputNameChanged(outputName);
++    scheduleUpdate();
++}
++
++void ScreencastingRequest::resetDesktopId()
++{
++    setDesktopId(QString());
++}
++
++void ScreencastingRequest::setDesktopId(const QString &desktopId)
++{
++    if (m_desktopId == desktopId) {
++        return;
++    }
++
++    m_desktopId = desktopId;
++    Q_EMIT desktopIdChanged(desktopId);
++    scheduleUpdate();
++}
++
++QString ScreencastingRequest::desktopId() const
++{
++    return m_desktopId;
++}
++
++void ScreencastingRequest::setMaxSize(const QSize &maxSize)
++{
++    if (m_maxSize == maxSize) {
++        return;
++    }
++
++    m_maxSize = maxSize;
++    Q_EMIT maxSizeChanged(maxSize);
++    scheduleUpdate();
++}
++
++QSize ScreencastingRequest::maxSize() const
++{
++    return m_maxSize;
++}
++
++void ScreencastingRequest::scheduleUpdate()
++{
++    // The properties that describe a stream are set one at a time, wait until
++    // they have all settled so that we request a single stream.
++    if (m_updateScheduled) {
++        return;
++    }
++    m_updateScheduled = true;
++    QMetaObject::invokeMethod(this, &ScreencastingRequest::update, Qt::QueuedConnection);
++}
++
++void ScreencastingRequest::update()
++{
++    m_updateScheduled = false;
++    setStream(nullptr);
++
++    if (m_uuid.isEmpty() && m_outputName.isEmpty() && m_desktopId.isEmpty()) {
++        return;
++    }
+ 
+-    if (!m_outputName.isEmpty()) {
+-        if (!m_screenCasting) {
+-            m_screenCasting = std::make_unique<Screencasting>();
+-        }
++    if (!m_screenCasting) {
++        m_screenCasting = std::make_unique<Screencasting>();
++    }
++
++    if (!m_desktopId.isEmpty()) {
++        setStream(m_screenCasting->createDesktopStream(m_desktopId, m_outputName, m_maxSize, Screencasting::pointer_hidden));
++    } else if (!m_uuid.isEmpty()) {
++        setStream(m_screenCasting->createWindowStream(m_uuid, m_maxSize, Screencasting::pointer_hidden));
++    } else {
+         setStream(m_screenCasting->createOutputStream(m_outputName, Screencasting::pointer_hidden));
+     }
+ }
+diff --git a/libtaskmanager/screencastingrequest.h b/libtaskmanager/screencastingrequest.h
+index 829ab78f1e..1e4c45978d 100644
+--- a/libtaskmanager/screencastingrequest.h
++++ b/libtaskmanager/screencastingrequest.h
+@@ -8,6 +8,7 @@
+ 
+ #include "screencasting.h"
+ #include <QObject>
++#include <QSize>
+ #include <qqmlregistration.h>
+ 
+ /**
+@@ -36,6 +37,20 @@ class ScreencastingRequest : public QObject
+      */
+     Q_PROPERTY(QString outputName READ outputName WRITE setOutputName RESET resetOutputName NOTIFY outputNameChanged)
+ 
++    /**
++     * The identifier of the virtual desktop we want to cast. Requires maxSize.
++     * If outputName is set as well, the stream is limited to that output.
++     *
++     * @see VirtualDesktopInfo::desktopIds
++     */
++    Q_PROPERTY(QString desktopId READ desktopId WRITE setDesktopId RESET resetDesktopId NOTIFY desktopIdChanged)
++
++    /**
++     * If valid, the stream is scaled down to fit inside this size, in buffer
++     * pixels. Use it for thumbnails. Applies to window and desktop streams.
++     */
++    Q_PROPERTY(QSize maxSize READ maxSize WRITE setMaxSize NOTIFY maxSizeChanged)
++
+     /** The offered nodeId to give to a source */
+     Q_PROPERTY(quint32 nodeId READ nodeId NOTIFY nodeIdChanged)
+     Q_PROPERTY(quint64 objectSerial READ objectSerial NOTIFY objectSerialChanged)
+@@ -51,6 +66,13 @@ public:
+     void setOutputName(const QString &outputName);
+     QString outputName() const;
+ 
++    void resetDesktopId();
++    void setDesktopId(const QString &desktopId);
++    QString desktopId() const;
++
++    void setMaxSize(const QSize &maxSize);
++    QSize maxSize() const;
++
+     quint32 nodeId() const;
+     quint64 objectSerial() const;
+ 
+@@ -58,16 +80,23 @@ Q_SIGNALS:
+     void nodeIdChanged(quint32 nodeId);
+     void uuidChanged(const QString &uuid);
+     void outputNameChanged(const QString &outputNames);
++    void desktopIdChanged(const QString &desktopId);
++    void maxSizeChanged(const QSize &maxSize);
+     void objectSerialChanged(quint64 objectSerial);
+ 
+ private:
+     void setNodeid(uint nodeId);
+     void setStream(std::unique_ptr<ScreencastingStream> stream);
++    void scheduleUpdate();
++    void update();
+ 
+     std::unique_ptr<Screencasting> m_screenCasting;
+     std::unique_ptr<ScreencastingStream> m_stream;
+     QString m_uuid;
+     QString m_outputName;
++    QString m_desktopId;
++    QSize m_maxSize;
++    bool m_updateScheduled = false;
+     quint32 m_nodeId = 0;
+     quint64 m_objectSerial = 0;
+ };

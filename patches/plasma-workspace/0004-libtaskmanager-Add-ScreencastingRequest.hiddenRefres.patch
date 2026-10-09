@@ -1,0 +1,140 @@
+From 92f39ef857ca227bc2b57960a8ec60a7fcff82ea Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 10:24:11 -0700
+Subject: [PATCH 4/4] libtaskmanager: Add
+ ScreencastingRequest.hiddenRefreshRate
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ libtaskmanager/screencasting.cpp        |  4 ++--
+ libtaskmanager/screencasting.h          |  2 +-
+ libtaskmanager/screencastingrequest.cpp | 21 +++++++++++++++++++--
+ libtaskmanager/screencastingrequest.h   | 13 +++++++++++++
+ 4 files changed, 35 insertions(+), 5 deletions(-)
+
+diff --git a/libtaskmanager/screencasting.cpp b/libtaskmanager/screencasting.cpp
+index 42619fb3ab..e9dc1176f8 100644
+--- a/libtaskmanager/screencasting.cpp
++++ b/libtaskmanager/screencasting.cpp
+@@ -106,7 +106,7 @@ std::unique_ptr<ScreencastingStream> Screencasting::createWindowStream(const QSt
+     return stream;
+ }
+ 
+-std::unique_ptr<ScreencastingStream> Screencasting::createDesktopStream(const QString &desktopId, const QString &outputName, const QSize &maxSize, bool excludeBackground, pointer mode)
++std::unique_ptr<ScreencastingStream> Screencasting::createDesktopStream(const QString &desktopId, const QString &outputName, const QSize &maxSize, bool excludeBackground, uint hiddenRefreshRate, pointer mode)
+ {
+     if (!isActive() || maxSize.isEmpty()) {
+         return nullptr;
+@@ -125,7 +125,7 @@ std::unique_ptr<ScreencastingStream> Screencasting::createDesktopStream(const QS
+ 
+     auto stream = std::make_unique<ScreencastingStream>();
+     stream->setObjectName(desktopId);
+-    stream->init(stream_desktop(desktopId, output, maxSize.width(), maxSize.height(), excludeBackground ? desktop_flags_exclude_background : 0, mode));
++    stream->init(stream_desktop(desktopId, output, maxSize.width(), maxSize.height(), excludeBackground ? desktop_flags_exclude_background : 0, hiddenRefreshRate, mode));
+     return stream;
+ }
+ 
+diff --git a/libtaskmanager/screencasting.h b/libtaskmanager/screencasting.h
+index 297a898733..784c5bbb91 100644
+--- a/libtaskmanager/screencasting.h
++++ b/libtaskmanager/screencasting.h
+@@ -59,7 +59,7 @@ public:
+      * covers the whole workspace. With @p excludeBackground the desktop background is left
+      * transparent. Returns nullptr if the compositor doesn't support it.
+      */
+-    std::unique_ptr<ScreencastingStream> createDesktopStream(const QString &desktopId, const QString &outputName, const QSize &maxSize, bool excludeBackground, pointer mode);
++    std::unique_ptr<ScreencastingStream> createDesktopStream(const QString &desktopId, const QString &outputName, const QSize &maxSize, bool excludeBackground, uint hiddenRefreshRate, pointer mode);
+ 
+ private:
+     wl_output *findOutput(const QString &outputName) const;
+diff --git a/libtaskmanager/screencastingrequest.cpp b/libtaskmanager/screencastingrequest.cpp
+index c471338e70..23ece15250 100644
+--- a/libtaskmanager/screencastingrequest.cpp
++++ b/libtaskmanager/screencastingrequest.cpp
+@@ -116,6 +116,23 @@ bool ScreencastingRequest::excludeBackground() const
+     return m_excludeBackground;
+ }
+ 
++void ScreencastingRequest::setHiddenRefreshRate(int rate)
++{
++    rate = std::max(0, rate);
++    if (m_hiddenRefreshRate == rate) {
++        return;
++    }
++
++    m_hiddenRefreshRate = rate;
++    Q_EMIT hiddenRefreshRateChanged(rate);
++    scheduleUpdate();
++}
++
++int ScreencastingRequest::hiddenRefreshRate() const
++{
++    return m_hiddenRefreshRate;
++}
++
+ void ScreencastingRequest::scheduleUpdate()
+ {
+     // The properties that describe a stream are set one at a time, wait until
+@@ -133,7 +150,7 @@ void ScreencastingRequest::update()
+ 
+     QVariantList request;
+     if (!m_desktopId.isEmpty()) {
+-        request = {u"desktop"_s, m_desktopId, m_outputName, m_maxSize, m_excludeBackground};
++        request = {u"desktop"_s, m_desktopId, m_outputName, m_maxSize, m_excludeBackground, m_hiddenRefreshRate};
+     } else if (!m_uuid.isEmpty()) {
+         request = {u"window"_s, m_uuid, m_maxSize};
+     } else if (!m_outputName.isEmpty()) {
+@@ -158,7 +175,7 @@ void ScreencastingRequest::update()
+     }
+ 
+     if (!m_desktopId.isEmpty()) {
+-        setStream(m_screenCasting->createDesktopStream(m_desktopId, m_outputName, m_maxSize, m_excludeBackground, Screencasting::pointer_hidden));
++        setStream(m_screenCasting->createDesktopStream(m_desktopId, m_outputName, m_maxSize, m_excludeBackground, m_hiddenRefreshRate, Screencasting::pointer_hidden));
+     } else if (!m_uuid.isEmpty()) {
+         setStream(m_screenCasting->createWindowStream(m_uuid, m_maxSize, Screencasting::pointer_hidden));
+     } else {
+diff --git a/libtaskmanager/screencastingrequest.h b/libtaskmanager/screencastingrequest.h
+index eef9c0342d..bdc0d5d0fe 100644
+--- a/libtaskmanager/screencastingrequest.h
++++ b/libtaskmanager/screencastingrequest.h
+@@ -58,6 +58,14 @@ class ScreencastingRequest : public QObject
+      */
+     Q_PROPERTY(bool excludeBackground READ excludeBackground WRITE setExcludeBackground NOTIFY excludeBackgroundChanged)
+ 
++    /**
++     * For a desktop stream: how many times a second the windows of a desktop that
++     * is not shown are asked to draw. They are not on screen, and every update costs
++     * the programs they belong to some work. 0 leaves it to the compositor, which
++     * then updates them about once a second.
++     */
++    Q_PROPERTY(int hiddenRefreshRate READ hiddenRefreshRate WRITE setHiddenRefreshRate NOTIFY hiddenRefreshRateChanged)
++
+     /** The offered nodeId to give to a source */
+     Q_PROPERTY(quint32 nodeId READ nodeId NOTIFY nodeIdChanged)
+     Q_PROPERTY(quint64 objectSerial READ objectSerial NOTIFY objectSerialChanged)
+@@ -83,6 +91,9 @@ public:
+     void setExcludeBackground(bool exclude);
+     bool excludeBackground() const;
+ 
++    void setHiddenRefreshRate(int rate);
++    int hiddenRefreshRate() const;
++
+     quint32 nodeId() const;
+     quint64 objectSerial() const;
+ 
+@@ -93,6 +104,7 @@ Q_SIGNALS:
+     void desktopIdChanged(const QString &desktopId);
+     void maxSizeChanged(const QSize &maxSize);
+     void excludeBackgroundChanged(bool exclude);
++    void hiddenRefreshRateChanged(int rate);
+     void objectSerialChanged(quint64 objectSerial);
+ 
+ private:
+@@ -108,6 +120,7 @@ private:
+     QString m_desktopId;
+     QSize m_maxSize;
+     bool m_excludeBackground = false;
++    int m_hiddenRefreshRate = 0;
+     bool m_updateScheduled = false;
+     QVariantList m_request;
+     int m_retries = 0;

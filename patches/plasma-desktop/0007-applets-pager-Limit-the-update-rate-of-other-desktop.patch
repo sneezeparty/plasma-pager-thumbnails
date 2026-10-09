@@ -1,0 +1,52 @@
+From b3ffcb97acf5d547442ee96db7c2a6b6c14edfe3 Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 10:41:59 -0700
+Subject: [PATCH 7/7] applets/pager: Limit the update rate of other desktops to
+ 15
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ applets/pager/main.xml              | 2 +-
+ applets/pager/qml/configGeneral.qml | 2 +-
+ applets/pager/qml/main.qml          | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/applets/pager/main.xml b/applets/pager/main.xml
+index 64e69425ad..9d429d67bd 100644
+--- a/applets/pager/main.xml
++++ b/applets/pager/main.xml
+@@ -31,7 +31,7 @@
+       <label>How many times a second the live thumbnails of desktops that are not shown are updated.</label>
+       <default>1</default>
+       <min>1</min>
+-      <max>30</max>
++      <max>15</max>
+     </entry>
+     <entry name="showWallpaper" type="Bool">
+       <label>Whether to show the wallpaper of each virtual desktop.</label>
+diff --git a/applets/pager/qml/configGeneral.qml b/applets/pager/qml/configGeneral.qml
+index 9f2608270d..c44a245dff 100644
+--- a/applets/pager/qml/configGeneral.qml
++++ b/applets/pager/qml/configGeneral.qml
+@@ -73,7 +73,7 @@ KCM.SimpleKCM {
+             QQC2.SpinBox {
+                 id: hiddenDesktopRefreshRate
+                 from: 1
+-                to: 30
++                to: 15
+             }
+ 
+             QQC2.Label {
+diff --git a/applets/pager/qml/main.qml b/applets/pager/qml/main.qml
+index a5864c0322..965d455f1e 100644
+--- a/applets/pager/qml/main.qml
++++ b/applets/pager/qml/main.qml
+@@ -578,7 +578,7 @@ PlasmoidItem {
+                                                  Math.ceil(clipRect.height * root.Screen.devicePixelRatio))
+                                 // With the wallpaper drawn above, the stream only has to bring the windows
+                                 excludeBackground: wallpaperLayer.active
+-                                hiddenRefreshRate: Plasmoid.configuration.hiddenDesktopRefreshRate
++                                hiddenRefreshRate: Math.max(1, Math.min(15, Plasmoid.configuration.hiddenDesktopRefreshRate))
+                             }
+                         }
+                     }

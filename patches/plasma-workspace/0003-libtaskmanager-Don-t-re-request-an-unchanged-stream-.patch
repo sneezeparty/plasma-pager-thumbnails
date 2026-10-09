@@ -1,0 +1,98 @@
+From fd45ea252dcd7aa32105a5cdb6d499e6984dc5d9 Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 07:49:21 -0700
+Subject: [PATCH 3/4] libtaskmanager: Don't re-request an unchanged stream,
+ retry a closed one
+
+A property that doesn't matter for the kind of stream requested no
+longer makes ScreencastingRequest ask for a new one. A stream that the
+compositor closed is requested again a few times, with growing delays.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ libtaskmanager/screencastingrequest.cpp | 33 ++++++++++++++++++++++++-
+ libtaskmanager/screencastingrequest.h   |  3 +++
+ 2 files changed, 35 insertions(+), 1 deletion(-)
+
+diff --git a/libtaskmanager/screencastingrequest.cpp b/libtaskmanager/screencastingrequest.cpp
+index 0e5da58898..c471338e70 100644
+--- a/libtaskmanager/screencastingrequest.cpp
++++ b/libtaskmanager/screencastingrequest.cpp
+@@ -8,6 +8,11 @@
+ 
+ #include <QCoreApplication>
+ #include <QDebug>
++#include <QTimer>
++
++using namespace Qt::StringLiterals;
++
++static const int s_maxRetries = 5;
+ 
+ ScreencastingRequest::ScreencastingRequest(QObject *parent)
+     : QObject(parent)
+@@ -125,9 +130,26 @@ void ScreencastingRequest::scheduleUpdate()
+ void ScreencastingRequest::update()
+ {
+     m_updateScheduled = false;
++
++    QVariantList request;
++    if (!m_desktopId.isEmpty()) {
++        request = {u"desktop"_s, m_desktopId, m_outputName, m_maxSize, m_excludeBackground};
++    } else if (!m_uuid.isEmpty()) {
++        request = {u"window"_s, m_uuid, m_maxSize};
++    } else if (!m_outputName.isEmpty()) {
++        request = {u"output"_s, m_outputName};
++    }
++    // A property that doesn't matter for this kind of stream may have changed
++    if (request == m_request && (m_stream || request.isEmpty())) {
++        return;
++    }
++    if (request != m_request) {
++        m_retries = 0;
++    }
++    m_request = request;
+     setStream(nullptr);
+ 
+-    if (m_uuid.isEmpty() && m_outputName.isEmpty() && m_desktopId.isEmpty()) {
++    if (request.isEmpty()) {
+         return;
+     }
+ 
+@@ -151,7 +173,16 @@ void ScreencastingRequest::setStream(std::unique_ptr<ScreencastingStream> stream
+ 
+         connect(m_stream.get(), &ScreencastingStream::created, this, &ScreencastingRequest::setNodeid);
+         connect(m_stream.get(), &ScreencastingStream::closed, this, [this]() {
++            // The compositor ended the stream, for example because the output it showed
++            // went away for a moment. What was asked for may well exist again; a request
++            // for something that is gone for good fails and is not repeated.
++            // (not deleted here: this is called from inside the stream)
++            m_stream.release()->deleteLater();
+             setNodeid(0);
++            if (m_retries < s_maxRetries) {
++                ++m_retries;
++                QTimer::singleShot(m_retries * 1000, this, &ScreencastingRequest::scheduleUpdate);
++            }
+         });
+         connect(m_stream.get(), &ScreencastingStream::failed, this, [](const QString &error) {
+             qWarning() << "error creating screencast" << error;
+diff --git a/libtaskmanager/screencastingrequest.h b/libtaskmanager/screencastingrequest.h
+index 73b8f99dab..eef9c0342d 100644
+--- a/libtaskmanager/screencastingrequest.h
++++ b/libtaskmanager/screencastingrequest.h
+@@ -9,6 +9,7 @@
+ #include "screencasting.h"
+ #include <QObject>
+ #include <QSize>
++#include <QVariantList>
+ #include <qqmlregistration.h>
+ 
+ /**
+@@ -108,6 +109,8 @@ private:
+     QSize m_maxSize;
+     bool m_excludeBackground = false;
+     bool m_updateScheduled = false;
++    QVariantList m_request;
++    int m_retries = 0;
+     quint32 m_nodeId = 0;
+     quint64 m_objectSerial = 0;
+ };

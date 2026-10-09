@@ -1,0 +1,27 @@
+# Only what is listed here is published. Everything else in this directory is build
+# output, upstream checkouts, logs, screenshots of a real desktop or personal config.
+/*
+!/.gitignore
+!/README.md
+!/LICENSE
+!/*.sh
+!/pin-list.txt
+!/patches/
+!/session/
+/session/*
+!/session/*.sh
+!/tests/
+/tests/*
+!/tests/*.sh
+!/tests/measure.py
+!/tests/streams.qml
+!/tests/*.js
+!/src/
+/src/*
+!/src/desktop-wallpapers/
+!/docs/
+/docs/*
+!/docs/pager-thumbnails.png
+!/docs/wallpaper-settings.png
+!/docs/session.md
+!/docs/pager-settings.png

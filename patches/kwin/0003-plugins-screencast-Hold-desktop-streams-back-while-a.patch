@@ -1,0 +1,94 @@
+From 6bd5a581ba446679f38fbe036fe1d8229f59836c Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 18:57:18 -0700
+Subject: [PATCH 3/8] plugins/screencast: Hold desktop streams back while a
+ fullscreen window is active
+
+Keeps thumbnail rendering out of the way of games and videos.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ .../screencast/desktopscreencastsource.cpp    | 23 +++++++++++++++----
+ .../screencast/desktopscreencastsource.h      |  2 ++
+ 2 files changed, 21 insertions(+), 4 deletions(-)
+
+diff --git a/src/plugins/screencast/desktopscreencastsource.cpp b/src/plugins/screencast/desktopscreencastsource.cpp
+index daf7fe77cf..ff4ac4b786 100644
+--- a/src/plugins/screencast/desktopscreencastsource.cpp
++++ b/src/plugins/screencast/desktopscreencastsource.cpp
+@@ -56,6 +56,7 @@ DesktopScreenCastSource::DesktopScreenCastSource(VirtualDesktop *desktop, Logica
+     connect(workspace(), &Workspace::currentActivityChanged, this, &DesktopScreenCastSource::updateWindows);
+     connect(workspace(), &Workspace::geometryChanged, this, &DesktopScreenCastSource::updateWindows);
+     connect(waylandServer(), &WaylandServer::lockStateChanged, this, &DesktopScreenCastSource::updateWindows);
++    connect(workspace(), &Workspace::windowActivated, this, &DesktopScreenCastSource::scheduleFrame);
+ 
+     const auto windows = workspace()->windows();
+     for (Window *window : windows) {
+@@ -83,7 +84,7 @@ void DesktopScreenCastSource::track(Window *window)
+         if (m_windows.removeOne(window)) {
+             if (m_active) {
+                 unwatch(window);
+-                Q_EMIT frame();
++                scheduleFrame();
+             }
+         }
+     });
+@@ -94,6 +95,7 @@ void DesktopScreenCastSource::track(Window *window)
+     connect(window, &Window::readyForPaintingChanged, this, &DesktopScreenCastSource::updateWindows);
+     connect(window, &Window::excludeFromCaptureChanged, this, &DesktopScreenCastSource::updateWindows);
+     connect(window, &Window::frameGeometryChanged, this, &DesktopScreenCastSource::updateWindows);
++    connect(window, &Window::fullScreenChanged, this, &DesktopScreenCastSource::scheduleFrame);
+ }
+ 
+ bool DesktopScreenCastSource::accepts(const Window *window) const
+@@ -146,7 +148,20 @@ void DesktopScreenCastSource::updateWindows()
+     }
+     m_windows = windows;
+ 
+-    if (m_active) {
++    scheduleFrame();
++}
++
++bool DesktopScreenCastSource::isHeldBack() const
++{
++    // Stay out of the way of games and videos. Whoever shows the stream is most
++    // likely covered by the fullscreen window anyway.
++    const Window *active = workspace()->activeWindow();
++    return active && active->isFullScreen();
++}
++
++void DesktopScreenCastSource::scheduleFrame()
++{
++    if (m_active && !isHeldBack()) {
+         Q_EMIT frame();
+     }
+ }
+@@ -155,13 +170,13 @@ void DesktopScreenCastSource::watch(Window *window)
+ {
+     // Windows on other desktops only need to be roughly up to date
+     window->refThrottledOffscreenRendering();
+-    connect(window, &Window::damaged, this, &DesktopScreenCastSource::frame);
++    connect(window, &Window::damaged, this, &DesktopScreenCastSource::scheduleFrame);
+ }
+ 
+ void DesktopScreenCastSource::unwatch(Window *window)
+ {
+     window->unrefThrottledOffscreenRendering();
+-    disconnect(window, &Window::damaged, this, &DesktopScreenCastSource::frame);
++    disconnect(window, &Window::damaged, this, &DesktopScreenCastSource::scheduleFrame);
+ }
+ 
+ RectF DesktopScreenCastSource::boundingRect() const
+diff --git a/src/plugins/screencast/desktopscreencastsource.h b/src/plugins/screencast/desktopscreencastsource.h
+index 47e4c80c0e..242a20a203 100644
+--- a/src/plugins/screencast/desktopscreencastsource.h
++++ b/src/plugins/screencast/desktopscreencastsource.h
+@@ -61,6 +61,8 @@ private:
+     void watch(Window *window);
+     void unwatch(Window *window);
+     void updateWindows();
++    void scheduleFrame();
++    bool isHeldBack() const;
+     bool accepts(const Window *window) const;
+     bool isCurrent() const;
+     RectF boundingRect() const;

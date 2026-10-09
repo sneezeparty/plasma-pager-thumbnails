@@ -1,0 +1,105 @@
+From 4f5bc2406ae9c0f200659d81f9d1c36af64d25f1 Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 18:57:18 -0700
+Subject: [PATCH 2/7] applets/pager: Cut out areas no screen covers in desktop
+ thumbnails
+
+The stream has no alpha channel, so with several screens the gaps showed up black.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ applets/pager/qml/main.qml | 65 ++++++++++++++++++++++++++++++++------
+ 1 file changed, 56 insertions(+), 9 deletions(-)
+
+diff --git a/applets/pager/qml/main.qml b/applets/pager/qml/main.qml
+index dd3480c6ae..db785f89d9 100644
+--- a/applets/pager/qml/main.qml
++++ b/applets/pager/qml/main.qml
+@@ -8,6 +8,7 @@
+ pragma ComponentBehavior: Bound
+ 
+ import QtQuick
++import QtQuick.Effects
+ import QtQuick.Layouts
+ import org.kde.plasma.plasmoid
+ import org.kde.plasma.core as PlasmaCore
+@@ -469,24 +470,70 @@ PlasmoidItem {
+ 
+                         // Whether a thumbnail is being shown, the window rectangles
+                         // then only act as invisible drag handles.
+-                        readonly property bool live: (item as PipeWire.PipeWireSourceItem)?.ready ?? false
++                        readonly property bool live: (item as DesktopThumbnail)?.ready ?? false
+ 
+                         anchors.fill: parent
+                         z: 0 // Below the window rectangles
+                         active: Plasmoid.configuration.showThumbnails && !root.isActivityPager
+                             && desktop.desktopId !== "" && clipRect.width > 0 && clipRect.height > 0
+ 
+-                        sourceComponent: PipeWire.PipeWireSourceItem {
+-                            nodeId: desktopStream.nodeId
++                        component DesktopThumbnail: Item {
++                            id: thumbnail
+ 
+-                            TaskManager.ScreencastingRequest {
+-                                id: desktopStream
+-                                desktopId: desktop.desktopId
+-                                outputName: Plasmoid.configuration.showOnlyCurrentScreen ? root.Screen.name : ""
+-                                maxSize: Qt.size(Math.ceil(clipRect.width * root.Screen.devicePixelRatio),
+-                                                 Math.ceil(clipRect.height * root.Screen.devicePixelRatio))
++                            readonly property alias ready: stream.ready
++                            // The stream has no alpha channel, so with several screens
++                            // the areas that no screen covers have to be cut out.
++                            readonly property bool masked: !Plasmoid.configuration.showOnlyCurrentScreen
++                                && Qt.application.screens.length > 1
++
++                            PipeWire.PipeWireSourceItem {
++                                id: stream
++                                anchors.fill: parent
++                                // The item has to stay visible, it stops its stream otherwise
++                                layer.enabled: thumbnail.masked
++                                layer.effect: MultiEffect {
++                                    maskEnabled: true
++                                    maskSource: screensMask
++                                }
++                                nodeId: desktopStream.nodeId
++
++                                TaskManager.ScreencastingRequest {
++                                    id: desktopStream
++                                    desktopId: desktop.desktopId
++                                    outputName: Plasmoid.configuration.showOnlyCurrentScreen ? root.Screen.name : ""
++                                    maxSize: Qt.size(Math.ceil(clipRect.width * root.Screen.devicePixelRatio),
++                                                     Math.ceil(clipRect.height * root.Screen.devicePixelRatio))
++                                }
++                            }
++
++                            Item {
++                                id: screensMask
++                                anchors.fill: parent
++                                visible: false
++                                layer.enabled: thumbnail.masked
++
++                                readonly property real originX: Math.min(...Qt.application.screens.map(screen => screen.virtualX))
++                                readonly property real originY: Math.min(...Qt.application.screens.map(screen => screen.virtualY))
++                                readonly property real scaleX: width / pagerModel.pagerItemSize.width
++                                readonly property real scaleY: height / pagerModel.pagerItemSize.height
++
++                                Repeater {
++                                    model: thumbnail.masked ? Qt.application.screens : []
++
++                                    Rectangle {
++                                        required property var modelData
++
++                                        x: (modelData.virtualX - screensMask.originX) * screensMask.scaleX
++                                        y: (modelData.virtualY - screensMask.originY) * screensMask.scaleY
++                                        width: modelData.width * screensMask.scaleX
++                                        height: modelData.height * screensMask.scaleY
++                                        color: "black"
++                                    }
++                                }
+                             }
+                         }
++
++                        sourceComponent: DesktopThumbnail {}
+                     }
+ 
+                     Repeater {

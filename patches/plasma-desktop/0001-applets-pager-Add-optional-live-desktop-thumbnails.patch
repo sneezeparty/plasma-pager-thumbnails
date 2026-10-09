@@ -1,0 +1,132 @@
+From 4258282275499b3b1f89c4b03d9f34cc600cc29d Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 17:57:56 -0700
+Subject: [PATCH 1/7] applets/pager: Add optional live desktop thumbnails
+
+Uses the desktop streams from zkde_screencast_unstable_v1 version 7; falls back to window outlines when the compositor doesn't offer them.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ applets/pager/main.xml              |  4 +++
+ applets/pager/qml/configGeneral.qml |  7 ++++++
+ applets/pager/qml/main.qml          | 38 ++++++++++++++++++++++++++---
+ 3 files changed, 45 insertions(+), 4 deletions(-)
+
+diff --git a/applets/pager/main.xml b/applets/pager/main.xml
+index d47b935b1e..456a2f514f 100644
+--- a/applets/pager/main.xml
++++ b/applets/pager/main.xml
+@@ -23,6 +23,10 @@
+       <label>Whether to show window icons inside the window rectangles.</label>
+       <default>false</default>
+     </entry>
++    <entry name="showThumbnails" type="Bool">
++      <label>Whether to show live thumbnails of the virtual desktops.</label>
++      <default>false</default>
++    </entry>
+     <entry name="showOnlyCurrentScreen" type="Bool">
+       <label>Whether to limit the Pager to the set of windows and the geometry of the screen the widget resides on.</label>
+       <default>false</default>
+diff --git a/applets/pager/qml/configGeneral.qml b/applets/pager/qml/configGeneral.qml
+index 4f0e03d728..04b40c1127 100644
+--- a/applets/pager/qml/configGeneral.qml
++++ b/applets/pager/qml/configGeneral.qml
+@@ -21,6 +21,7 @@ KCM.SimpleKCM {
+     property alias cfg_showWindowIcons: showWindowIcons.checked
+     property int cfg_currentDesktopSelected
+     property alias cfg_pagerLayout: pagerLayout.currentIndex
++    property alias cfg_showThumbnails: showThumbnails.checked
+     property alias cfg_showOnlyCurrentScreen: showOnlyCurrentScreen.checked
+     property alias cfg_wrapPage: wrapPage.checked
+ 
+@@ -47,6 +48,12 @@ KCM.SimpleKCM {
+             enabled: showWindowOutlines.checked
+         }
+ 
++        QQC2.CheckBox {
++            id: showThumbnails
++            text: i18nc("@option:check", "Show live desktop thumbnails") // qmllint disable unqualified
++            visible: !root.isActivityPager
++        }
++
+         QQC2.CheckBox {
+             id: showOnlyCurrentScreen
+             text: i18nc("@option:check", "Show only current screen") // qmllint disable unqualified
+diff --git a/applets/pager/qml/main.qml b/applets/pager/qml/main.qml
+index 514099e409..dd3480c6ae 100644
+--- a/applets/pager/qml/main.qml
++++ b/applets/pager/qml/main.qml
+@@ -17,6 +17,8 @@ import org.kde.draganddrop as DnD
+ import plasma.applet.org.kde.plasma.pager
+ import org.kde.plasma.activityswitcher as ActivitySwitcher
+ import org.kde.kirigami as Kirigami
++import org.kde.pipewire as PipeWire
++import org.kde.taskmanager as TaskManager
+ 
+ import org.kde.kcmutils as KCM
+ import org.kde.config as KConfig
+@@ -391,7 +393,8 @@ PlasmoidItem {
+                 component PagerFrame : KSvg.FrameSvgItem {
+                     anchors.fill: parent
+                     imagePath: "widgets/pager"
+-                    opacity: desktop.state === usedPrefix ? 1 : 0
++                    // Don't bury a live thumbnail under the frame
++                    opacity: (desktop.state === usedPrefix ? 1 : 0) * (thumbnailLoader.live ? 0.35 : 1)
+                 }
+ 
+                 PagerFrame {
+@@ -461,6 +464,31 @@ PlasmoidItem {
+                     width: desktop.width - 2 * x
+                     height: desktop.height - 2 * y
+ 
++                    Loader {
++                        id: thumbnailLoader
++
++                        // Whether a thumbnail is being shown, the window rectangles
++                        // then only act as invisible drag handles.
++                        readonly property bool live: (item as PipeWire.PipeWireSourceItem)?.ready ?? false
++
++                        anchors.fill: parent
++                        z: 0 // Below the window rectangles
++                        active: Plasmoid.configuration.showThumbnails && !root.isActivityPager
++                            && desktop.desktopId !== "" && clipRect.width > 0 && clipRect.height > 0
++
++                        sourceComponent: PipeWire.PipeWireSourceItem {
++                            nodeId: desktopStream.nodeId
++
++                            TaskManager.ScreencastingRequest {
++                                id: desktopStream
++                                desktopId: desktop.desktopId
++                                outputName: Plasmoid.configuration.showOnlyCurrentScreen ? root.Screen.name : ""
++                                maxSize: Qt.size(Math.ceil(clipRect.width * root.Screen.devicePixelRatio),
++                                                 Math.ceil(clipRect.height * root.Screen.devicePixelRatio))
++                            }
++                        }
++                    }
++
+                     Repeater {
+                         id: windowRectRepeater
+ 
+@@ -493,9 +521,11 @@ PlasmoidItem {
+                             y: Math.round(geometry.y * pagerItemGrid.heightScaleFactor) - 1
+                             width: Math.round(geometry.width * pagerItemGrid.widthScaleFactor)
+                             height: Math.round(geometry.height * pagerItemGrid.heightScaleFactor)
+-                            visible: Plasmoid.configuration.showWindowOutlines && !minimized
++                            visible: (Plasmoid.configuration.showWindowOutlines || thumbnailLoader.live) && !minimized
+                             color: {
+-                                if (desktop.isCurrent) {
++                                if (thumbnailLoader.live) {
++                                    return "transparent";
++                                } else if (desktop.isCurrent) {
+                                     if (isActive) {
+                                         return root.windowActiveOnActiveDesktopColor;
+                                     } else {
+@@ -510,7 +540,7 @@ PlasmoidItem {
+                                 }
+                             }
+ 
+-                            border.width: 1
++                            border.width: thumbnailLoader.live ? 0 : 1
+                             border.color: isActive
+                                 ? root.windowActiveBorderColor
+                                 : root.windowInactiveBorderColor

@@ -1,0 +1,39 @@
+From 862e6f8c1cb104ce62b5c5b062ffd6ef75a99cd1 Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 10:24:11 -0700
+Subject: [PATCH 3/4] screencast: Let stream_desktop say how often hidden
+ windows update
+
+Windows of a virtual desktop that is not shown are asked to draw only
+now and then. The new hidden_refresh argument lets the client choose
+how often, with 0 for the compositor's default.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ src/protocols/zkde-screencast-unstable-v1.xml | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/protocols/zkde-screencast-unstable-v1.xml b/src/protocols/zkde-screencast-unstable-v1.xml
+index 739f6b9..4773bdd 100644
+--- a/src/protocols/zkde-screencast-unstable-v1.xml
++++ b/src/protocols/zkde-screencast-unstable-v1.xml
+@@ -113,6 +113,11 @@
+                 The buffers of this stream have an alpha channel: areas that
+                 no output covers are transparent, and so is everything but
+                 the windows if exclude_background is set.
++
++                Windows of a virtual desktop that is not shown are not on
++                screen and would not draw. hidden_refresh is how many times
++                a second the compositor asks them to draw for this stream,
++                0 for the compositor's default. The compositor may clamp it.
+             </description>
+             <arg name="stream" type="new_id" interface="zkde_screencast_stream_unstable_v1"/>
+             <arg name="desktop_id" type="string" summary="virtual desktop Identifier"/>
+@@ -120,6 +125,7 @@
+             <arg name="width" type="uint" summary="Maximum buffer width in pixels"/>
+             <arg name="height" type="uint" summary="Maximum buffer height in pixels"/>
+             <arg name="flags" type="uint" enum="desktop_flags" summary="Options"/>
++            <arg name="hidden_refresh" type="uint" summary="Updates per second of windows that are not on screen, 0 for the default"/>
+             <arg name="pointer" type="uint" summary="Requested pointer mode"/>
+         </request>
+     </interface>

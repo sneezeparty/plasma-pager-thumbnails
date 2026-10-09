@@ -1,0 +1,152 @@
+From 41b1e2e869a5c203309095493e046521d59d5505 Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 18:06:59 -0700
+Subject: [PATCH 2/8] plugins/screencast: Make idle desktop streams cheap
+
+Leave panels out of desktop streams: they are on every desktop and usually show the streams, so every update made all of them repaint again. Also only ask windows on hidden desktops to draw about once per second, through a new throttled offscreen rendering ref on Window.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ .../screencast/desktopscreencastsource.cpp    | 11 ++++-
+ src/window.cpp                                | 44 ++++++++++++++++---
+ src/window.h                                  |  9 ++++
+ 3 files changed, 55 insertions(+), 9 deletions(-)
+
+diff --git a/src/plugins/screencast/desktopscreencastsource.cpp b/src/plugins/screencast/desktopscreencastsource.cpp
+index 5c0568822e..daf7fe77cf 100644
+--- a/src/plugins/screencast/desktopscreencastsource.cpp
++++ b/src/plugins/screencast/desktopscreencastsource.cpp
+@@ -104,6 +104,12 @@ bool DesktopScreenCastSource::accepts(const Window *window) const
+     if (window->isMinimized() || window->isHidden() || window->excludeFromCapture()) {
+         return false;
+     }
++    // Panels are on every desktop and typically are where the stream ends up being
++    // shown. Including them would make every desktop stream repaint whenever any
++    // of them is displayed.
++    if (window->isDock()) {
++        return false;
++    }
+     if (!window->isOnDesktop(m_desktop) || !window->isOnCurrentActivity()) {
+         return false;
+     }
+@@ -147,13 +153,14 @@ void DesktopScreenCastSource::updateWindows()
+ 
+ void DesktopScreenCastSource::watch(Window *window)
+ {
+-    window->refOffscreenRendering();
++    // Windows on other desktops only need to be roughly up to date
++    window->refThrottledOffscreenRendering();
+     connect(window, &Window::damaged, this, &DesktopScreenCastSource::frame);
+ }
+ 
+ void DesktopScreenCastSource::unwatch(Window *window)
+ {
+-    window->unrefOffscreenRendering();
++    window->unrefThrottledOffscreenRendering();
+     disconnect(window, &Window::damaged, this, &DesktopScreenCastSource::frame);
+ }
+ 
+diff --git a/src/window.cpp b/src/window.cpp
+index aedd275a55..de1abd8153 100644
+--- a/src/window.cpp
++++ b/src/window.cpp
+@@ -4469,26 +4469,54 @@ bool Window::isLockScreenOverlay() const
+ 
+ void Window::refOffscreenRendering()
+ {
++    const bool wasOffscreenRendering = isOffscreenRendering();
+     m_offscreenRenderCount++;
+-    if (m_offscreenRenderCount == 1) {
+-        m_offscreenFramecallbackTimer.start(1'000'000 / output()->refreshRate());
+-        Q_EMIT offscreenRenderingChanged();
+-    }
++    updateOffscreenRendering(wasOffscreenRendering);
+ }
+ 
+ void Window::unrefOffscreenRendering()
+ {
+     Q_ASSERT(m_offscreenRenderCount);
++    const bool wasOffscreenRendering = isOffscreenRendering();
+     m_offscreenRenderCount--;
+-    if (m_offscreenRenderCount == 0) {
++    updateOffscreenRendering(wasOffscreenRendering);
++}
++
++void Window::refThrottledOffscreenRendering()
++{
++    const bool wasOffscreenRendering = isOffscreenRendering();
++    m_throttledOffscreenRenderCount++;
++    updateOffscreenRendering(wasOffscreenRendering);
++}
++
++void Window::unrefThrottledOffscreenRendering()
++{
++    Q_ASSERT(m_throttledOffscreenRenderCount);
++    const bool wasOffscreenRendering = isOffscreenRendering();
++    m_throttledOffscreenRenderCount--;
++    updateOffscreenRendering(wasOffscreenRendering);
++}
++
++static const int s_throttledOffscreenInterval = 1000;
++
++void Window::updateOffscreenRendering(bool wasOffscreenRendering)
++{
++    if (m_offscreenRenderCount > 0) {
++        m_offscreenFramecallbackTimer.start(1'000'000 / output()->refreshRate());
++    } else if (m_throttledOffscreenRenderCount > 0) {
++        m_offscreenFramecallbackTimer.start(s_throttledOffscreenInterval);
++    } else {
+         m_offscreenFramecallbackTimer.stop();
++    }
++
++    if (wasOffscreenRendering != isOffscreenRendering()) {
+         Q_EMIT offscreenRenderingChanged();
+     }
+ }
+ 
+ bool Window::isOffscreenRendering() const
+ {
+-    return m_offscreenRenderCount > 0;
++    return m_offscreenRenderCount > 0 || m_throttledOffscreenRenderCount > 0;
+ }
+ 
+ void Window::maybeSendFrameCallback()
+@@ -4498,7 +4526,9 @@ void Window::maybeSendFrameCallback()
+         const auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch());
+         m_windowItem->framePainted(nullptr, output(), nullptr, timestamp);
+         // update refresh rate, it might have changed
+-        m_offscreenFramecallbackTimer.start(1'000'000 / output()->refreshRate());
++        if (m_offscreenRenderCount > 0) {
++            m_offscreenFramecallbackTimer.start(1'000'000 / output()->refreshRate());
++        }
+         unref();
+     }
+ }
+diff --git a/src/window.h b/src/window.h
+index f1a5283af7..227ab1ca88 100644
+--- a/src/window.h
++++ b/src/window.h
+@@ -1396,6 +1396,13 @@ public:
+ 
+     void refOffscreenRendering();
+     void unrefOffscreenRendering();
++    /**
++     * Like refOffscreenRendering(), but while the window is not visible it is only
++     * asked to draw about once per second, instead of at the refresh rate of its
++     * output. Meant for thumbnails of windows that would otherwise be idle.
++     */
++    void refThrottledOffscreenRendering();
++    void unrefThrottledOffscreenRendering();
+     bool isOffscreenRendering() const;
+ 
+     qreal targetScale() const;
+@@ -1933,7 +1940,9 @@ protected:
+     WindowRules m_rules;
+     quint32 m_lastUsageSerial = 0;
+     bool m_lockScreenOverlay = false;
++    void updateOffscreenRendering(bool wasOffscreenRendering);
+     uint32_t m_offscreenRenderCount = 0;
++    uint32_t m_throttledOffscreenRenderCount = 0;
+     QTimer m_offscreenFramecallbackTimer;
+ 
+     QString m_tag;

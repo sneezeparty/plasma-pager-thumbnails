@@ -1,0 +1,217 @@
+From 5d6cf28ed0b5397f15a4bbb24b4fbc10cb0a3808 Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 06:04:35 -0700
+Subject: [PATCH 4/8] plugins/screencast: Desktop streams with alpha and
+ without the background
+
+Desktop streams no longer offer a format without alpha, so areas no output covers are transparent, and the background can be left out for consumers that draw it themselves. Also adds a temporary environment knob for the hidden-window update interval, used for measuring.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ src/plugins/screencast/desktopscreencastsource.cpp | 14 +++++++++++++-
+ src/plugins/screencast/desktopscreencastsource.h   |  4 +++-
+ src/plugins/screencast/screencastmanager.cpp       |  3 ++-
+ src/plugins/screencast/screencastmanager.h         |  1 +
+ src/plugins/screencast/screencastsource.h          |  8 ++++++++
+ src/plugins/screencast/screencaststream.cpp        |  4 +++-
+ src/wayland/screencast_v1.cpp                      |  3 ++-
+ src/wayland/screencast_v1.h                        |  2 +-
+ src/window.cpp                                     |  9 +++++++--
+ 9 files changed, 40 insertions(+), 8 deletions(-)
+
+diff --git a/src/plugins/screencast/desktopscreencastsource.cpp b/src/plugins/screencast/desktopscreencastsource.cpp
+index ff4ac4b786..3c1e9d6e18 100644
+--- a/src/plugins/screencast/desktopscreencastsource.cpp
++++ b/src/plugins/screencast/desktopscreencastsource.cpp
+@@ -31,12 +31,13 @@ namespace KWin
+ // Desktop streams are thumbnails, there is no point in keeping up with the display.
+ static const uint s_maxRefreshRate = 15000;
+ 
+-DesktopScreenCastSource::DesktopScreenCastSource(VirtualDesktop *desktop, LogicalOutput *output, const QSize &maxSize)
++DesktopScreenCastSource::DesktopScreenCastSource(VirtualDesktop *desktop, LogicalOutput *output, const QSize &maxSize, bool excludeBackground)
+     : ScreenCastSource()
+     , m_desktop(desktop)
+     , m_output(output)
+     , m_wholeWorkspace(!output)
+     , m_maxSize(maxSize)
++    , m_excludeBackground(excludeBackground)
+ {
+     Q_ASSERT(desktop);
+     Q_ASSERT(!m_maxSize.isEmpty());
+@@ -112,6 +113,11 @@ bool DesktopScreenCastSource::accepts(const Window *window) const
+     if (window->isDock()) {
+         return false;
+     }
++    // The consumer draws the background itself, for instance because it knows a
++    // different wallpaper for each desktop while there is only one desktop window.
++    if (m_excludeBackground && window->isDesktop()) {
++        return false;
++    }
+     if (!window->isOnDesktop(m_desktop) || !window->isOnCurrentActivity()) {
+         return false;
+     }
+@@ -201,6 +207,12 @@ bool DesktopScreenCastSource::isCurrent() const
+     return false;
+ }
+ 
++bool DesktopScreenCastSource::keepAlpha() const
++{
++    // Areas that no output covers, and the background if it is left out, are transparent.
++    return true;
++}
++
+ quint32 DesktopScreenCastSource::drmFormat() const
+ {
+     return DRM_FORMAT_ARGB8888;
+diff --git a/src/plugins/screencast/desktopscreencastsource.h b/src/plugins/screencast/desktopscreencastsource.h
+index 242a20a203..854962e5fe 100644
+--- a/src/plugins/screencast/desktopscreencastsource.h
++++ b/src/plugins/screencast/desktopscreencastsource.h
+@@ -35,12 +35,13 @@ public:
+     /**
+      * If @p output is null, the stream covers the whole workspace.
+      */
+-    explicit DesktopScreenCastSource(VirtualDesktop *desktop, LogicalOutput *output, const QSize &maxSize);
++    explicit DesktopScreenCastSource(VirtualDesktop *desktop, LogicalOutput *output, const QSize &maxSize, bool excludeBackground);
+     ~DesktopScreenCastSource() override;
+ 
+     quint32 drmFormat() const override;
+     QSize textureSize() const override;
+     qreal devicePixelRatio() const override;
++    bool keepAlpha() const override;
+     uint refreshRate() const override;
+ 
+     void setRenderCursor(bool enable) override;
+@@ -72,6 +73,7 @@ private:
+     const QPointer<LogicalOutput> m_output;
+     const bool m_wholeWorkspace;
+     const QSize m_maxSize;
++    const bool m_excludeBackground;
+     // The windows shown in the stream, in stacking order
+     QList<Window *> m_windows;
+     std::chrono::nanoseconds m_last{0};
+diff --git a/src/plugins/screencast/screencastmanager.cpp b/src/plugins/screencast/screencastmanager.cpp
+index 10b4dfddbb..f509d77164 100644
+--- a/src/plugins/screencast/screencastmanager.cpp
++++ b/src/plugins/screencast/screencastmanager.cpp
+@@ -96,6 +96,7 @@ void ScreencastManager::streamDesktop(ScreencastStreamV1Interface *waylandStream
+                                       const QString &desktopId,
+                                       OutputInterface *output,
+                                       const QSize &maxSize,
++                                      bool excludeBackground,
+                                       ScreencastV1Interface::CursorMode mode)
+ {
+     if (!isSupportedCompositingType()) {
+@@ -123,7 +124,7 @@ void ScreencastManager::streamDesktop(ScreencastStreamV1Interface *waylandStream
+         }
+     }
+ 
+-    auto source = new DesktopScreenCastSource(desktop, logicalOutput, clampScaledSize(maxSize));
++    auto source = new DesktopScreenCastSource(desktop, logicalOutput, clampScaledSize(maxSize), excludeBackground);
+     auto stream = new ScreenCastStream(source, getPipewireConnection(), this);
+     stream->setObjectName(desktop->name());
+     stream->setCursorMode(mode);
+diff --git a/src/plugins/screencast/screencastmanager.h b/src/plugins/screencast/screencastmanager.h
+index 8a30bf6c9d..862f66d355 100644
+--- a/src/plugins/screencast/screencastmanager.h
++++ b/src/plugins/screencast/screencastmanager.h
+@@ -35,6 +35,7 @@ private:
+                        const QString &desktopId,
+                        OutputInterface *output,
+                        const QSize &maxSize,
++                       bool excludeBackground,
+                        ScreencastV1Interface::CursorMode mode);
+     void streamWaylandOutput(ScreencastStreamV1Interface *stream,
+                              OutputInterface *output,
+diff --git a/src/plugins/screencast/screencastsource.h b/src/plugins/screencast/screencastsource.h
+index c15f81259b..d1cc83566a 100644
+--- a/src/plugins/screencast/screencastsource.h
++++ b/src/plugins/screencast/screencastsource.h
+@@ -30,6 +30,14 @@ public:
+     virtual quint32 drmFormat() const = 0;
+     virtual QSize textureSize() const = 0;
+     virtual qreal devicePixelRatio() const = 0;
++    /**
++     * Whether the stream is only useful with its alpha channel, in which case no
++     * format without one is offered to the consumer.
++     */
++    virtual bool keepAlpha() const
++    {
++        return false;
++    }
+ 
+     virtual void setRenderCursor(bool enable) = 0;
+     virtual Region render(GLFramebuffer *target, const Region &bufferRepair) = 0;
+diff --git a/src/plugins/screencast/screencaststream.cpp b/src/plugins/screencast/screencaststream.cpp
+index cb51ca2adf..64724e2a56 100644
+--- a/src/plugins/screencast/screencaststream.cpp
++++ b/src/plugins/screencast/screencaststream.cpp
+@@ -785,7 +785,9 @@ spa_pod *ScreenCastStream::buildFormat(struct spa_pod_builder *b, enum spa_video
+                             SPA_POD_Fraction(maxFramerate)),
+                         0);
+ 
+-    if (format == SPA_VIDEO_FORMAT_BGRA) {
++    if (m_source->keepAlpha()) {
++        spa_pod_builder_add(b, SPA_FORMAT_VIDEO_format, SPA_POD_Id(format), 0);
++    } else if (format == SPA_VIDEO_FORMAT_BGRA) {
+         /* announce equivalent format without alpha */
+         spa_pod_builder_add(b, SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(3, format, format, SPA_VIDEO_FORMAT_BGRx), 0);
+     } else if (format == SPA_VIDEO_FORMAT_RGBA) {
+diff --git a/src/wayland/screencast_v1.cpp b/src/wayland/screencast_v1.cpp
+index 903f6d8c47..e281fe1cfd 100644
+--- a/src/wayland/screencast_v1.cpp
++++ b/src/wayland/screencast_v1.cpp
+@@ -114,12 +114,13 @@ public:
+         Q_EMIT q->windowScreencastRequested(createStream(resource, streamid), uuid, QSize(width, height), ScreencastV1Interface::CursorMode(pointer));
+     }
+ 
+-    void zkde_screencast_unstable_v1_stream_desktop(Resource *resource, uint32_t streamid, const QString &desktopId, struct ::wl_resource *output, uint32_t width, uint32_t height, uint32_t pointer) override
++    void zkde_screencast_unstable_v1_stream_desktop(Resource *resource, uint32_t streamid, const QString &desktopId, struct ::wl_resource *output, uint32_t width, uint32_t height, uint32_t flags, uint32_t pointer) override
+     {
+         Q_EMIT q->desktopScreencastRequested(createStream(resource, streamid),
+                                              desktopId,
+                                              output ? OutputInterface::get(output) : nullptr,
+                                              QSize(width, height),
++                                             flags & desktop_flags_exclude_background,
+                                              ScreencastV1Interface::CursorMode(pointer));
+     }
+     void zkde_screencast_unstable_v1_stream_virtual_output(Resource *resource,
+diff --git a/src/wayland/screencast_v1.h b/src/wayland/screencast_v1.h
+index 7871382183..be2d4d9234 100644
+--- a/src/wayland/screencast_v1.h
++++ b/src/wayland/screencast_v1.h
+@@ -74,7 +74,7 @@ Q_SIGNALS:
+     /**
+      * @p output is null if the stream should cover the whole workspace.
+      */
+-    void desktopScreencastRequested(ScreencastStreamV1Interface *stream, const QString &desktopId, OutputInterface *output, const QSize &maxSize, CursorMode mode);
++    void desktopScreencastRequested(ScreencastStreamV1Interface *stream, const QString &desktopId, OutputInterface *output, const QSize &maxSize, bool excludeBackground, CursorMode mode);
+     void regionScreencastRequested(ScreencastStreamV1Interface *stream, const Rect &geometry, qreal scaling, CursorMode mode);
+ 
+ private:
+diff --git a/src/window.cpp b/src/window.cpp
+index de1abd8153..8461720e8c 100644
+--- a/src/window.cpp
++++ b/src/window.cpp
+@@ -4497,14 +4497,19 @@ void Window::unrefThrottledOffscreenRendering()
+     updateOffscreenRendering(wasOffscreenRendering);
+ }
+ 
+-static const int s_throttledOffscreenInterval = 1000;
++// TODO: temporary knob for measuring, to be replaced by a proper setting.
++static int throttledOffscreenInterval()
++{
++    static const int interval = qEnvironmentVariableIsSet("KWIN_THROTTLED_OFFSCREEN_INTERVAL") ? std::max(1, qEnvironmentVariableIntValue("KWIN_THROTTLED_OFFSCREEN_INTERVAL")) : 1000;
++    return interval;
++}
+ 
+ void Window::updateOffscreenRendering(bool wasOffscreenRendering)
+ {
+     if (m_offscreenRenderCount > 0) {
+         m_offscreenFramecallbackTimer.start(1'000'000 / output()->refreshRate());
+     } else if (m_throttledOffscreenRenderCount > 0) {
+-        m_offscreenFramecallbackTimer.start(s_throttledOffscreenInterval);
++        m_offscreenFramecallbackTimer.start(throttledOffscreenInterval());
+     } else {
+         m_offscreenFramecallbackTimer.stop();
+     }

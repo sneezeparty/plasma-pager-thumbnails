@@ -1,0 +1,614 @@
+From d6331b4697aa4c39302a71905dcd818703c20ac4 Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 06:04:35 -0700
+Subject: [PATCH 3/7] applets/pager: Show each desktop's wallpaper, and make
+ outlines over thumbnails optional
+
+The pager draws the wallpaper of each virtual desktop per screen itself, read from the containments' wallpaper configuration, and asks for desktop streams without the background when it does. The settings page offers window outlines or live thumbnails as the tile style.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ applets/pager/CMakeLists.txt        |   2 +
+ applets/pager/desktopwallpapers.cpp | 187 ++++++++++++++++++++++++++++
+ applets/pager/desktopwallpapers.h   |  70 +++++++++++
+ applets/pager/main.xml              |   8 ++
+ applets/pager/qml/configGeneral.qml |  52 ++++++--
+ applets/pager/qml/main.qml          | 138 ++++++++++----------
+ 6 files changed, 387 insertions(+), 70 deletions(-)
+ create mode 100644 applets/pager/desktopwallpapers.cpp
+ create mode 100644 applets/pager/desktopwallpapers.h
+
+diff --git a/applets/pager/CMakeLists.txt b/applets/pager/CMakeLists.txt
+index 69e0e4df48..d02d9fb1a8 100644
+--- a/applets/pager/CMakeLists.txt
++++ b/applets/pager/CMakeLists.txt
+@@ -5,6 +5,7 @@ plasma_add_applet(org.kde.plasma.pager
+         qml/config.qml
+         qml/configGeneral.qml
+     CPP_SOURCES
++        desktopwallpapers.cpp
+         pagermodel.cpp
+         windowmodel.cpp
+     RESOURCES
+@@ -15,6 +16,7 @@ plasma_add_applet(org.kde.plasma.pager
+ )
+ 
+ target_link_libraries(org.kde.plasma.pager PRIVATE
++    KF6::ConfigCore
+     KF6::WindowSystem
+     Plasma::Plasma
+     Plasma::Activities
+diff --git a/applets/pager/desktopwallpapers.cpp b/applets/pager/desktopwallpapers.cpp
+new file mode 100644
+index 0000000000..dca48c3928
+--- /dev/null
++++ b/applets/pager/desktopwallpapers.cpp
+@@ -0,0 +1,187 @@
++/*
++    SPDX-FileCopyrightText: 2026 sneezeparty <38020091+sneezeparty@users.noreply.github.com>
++    SPDX-License-Identifier: GPL-2.0-or-later
++*/
++
++#include "desktopwallpapers.h"
++
++#include <activityinfo.h>
++
++#include <KConfig>
++#include <KConfigGroup>
++
++#include <QDir>
++#include <QFileInfo>
++#include <QGuiApplication>
++#include <QRegularExpression>
++#include <QScreen>
++#include <QStandardPaths>
++
++using namespace Qt::StringLiterals;
++
++static QString configPath(const QString &name)
++{
++    return QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation) + u'/' + name;
++}
++
++static const QString s_appletsrc = u"plasma-org.kde.plasma.desktop-appletsrc"_s;
++static const QString s_shellrc = u"plasmashellrc"_s;
++static const QString s_perDesktopPlugin = u"com.github.sneezeparty.desktopwallpapers"_s;
++static const QString s_imagePlugin = u"org.kde.image"_s;
++
++// A wallpaper package is a folder with one image per resolution in contents/images,
++// named <width>x<height>.<ext>. Take the largest.
++static QUrl resolvePackage(const QUrl &url)
++{
++    const QFileInfo info(url.toLocalFile());
++    if (!info.isDir()) {
++        return url;
++    }
++
++    const QDir images(info.absoluteFilePath() + u"/contents/images"_s);
++    static const QRegularExpression size(u"^(\\d+)x(\\d+)\\."_s);
++    QString best;
++    qint64 bestArea = -1;
++    const auto entries = images.entryInfoList(QDir::Files);
++    for (const QFileInfo &entry : entries) {
++        const auto match = size.match(entry.fileName());
++        const qint64 area = match.hasMatch() ? match.captured(1).toLongLong() * match.captured(2).toLongLong() : 0;
++        if (area > bestArea) {
++            bestArea = area;
++            best = entry.absoluteFilePath();
++        }
++    }
++    return best.isEmpty() ? QUrl() : QUrl::fromLocalFile(best);
++}
++
++DesktopWallpapers::DesktopWallpapers(QObject *parent)
++    : QObject(parent)
++    , m_activityInfo(new TaskManager::ActivityInfo(this))
++{
++    // The files are rewritten, not edited in place, and often several times in a row.
++    m_reloadTimer.setSingleShot(true);
++    m_reloadTimer.setInterval(250);
++    connect(&m_reloadTimer, &QTimer::timeout, this, &DesktopWallpapers::reload);
++    connect(&m_watcher, &QFileSystemWatcher::fileChanged, &m_reloadTimer, qOverload<>(&QTimer::start));
++    connect(&m_watcher, &QFileSystemWatcher::directoryChanged, &m_reloadTimer, qOverload<>(&QTimer::start));
++    connect(m_activityInfo, &TaskManager::ActivityInfo::currentActivityChanged, this, &DesktopWallpapers::reload);
++
++    m_watcher.addPath(QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation));
++    connect(qGuiApp, &QGuiApplication::screenAdded, this, &DesktopWallpapers::reload);
++    connect(qGuiApp, &QGuiApplication::screenRemoved, this, &DesktopWallpapers::reload);
++    connect(qGuiApp, &QGuiApplication::primaryScreenChanged, this, &DesktopWallpapers::reload);
++    reload();
++}
++
++void DesktopWallpapers::watch()
++{
++    // A file that was replaced has to be added again.
++    for (const QString &name : {s_appletsrc, s_shellrc}) {
++        const QString path = configPath(name);
++        if (QFileInfo::exists(path) && !m_watcher.files().contains(path)) {
++            m_watcher.addPath(path);
++        }
++    }
++}
++
++void DesktopWallpapers::reload()
++{
++    watch();
++
++    // Plasma numbers the screens; the names are in plasmashellrc.
++    QHash<QString, QString> connectors;
++    {
++        const KConfig shellrc(configPath(s_shellrc), KConfig::SimpleConfig);
++        const KConfigGroup group = shellrc.group(u"ScreenConnectors"_s);
++        const auto keys = group.keyList();
++        for (const QString &key : keys) {
++            connectors.insert(key, group.readEntry(key, QString()));
++        }
++    }
++    if (connectors.isEmpty()) {
++        // Nothing saved yet, as in a brand new session: Plasma numbers the primary screen first.
++        QList<QScreen *> screens = QGuiApplication::screens();
++        screens.removeOne(QGuiApplication::primaryScreen());
++        screens.prepend(QGuiApplication::primaryScreen());
++        for (qsizetype i = 0; i < screens.size(); ++i) {
++            connectors.insert(QString::number(i), screens.at(i)->name());
++        }
++    }
++
++    QHash<QString, Screen> screens;
++    const KConfig appletsrc(configPath(s_appletsrc), KConfig::SimpleConfig);
++    const KConfigGroup containments = appletsrc.group(u"Containments"_s);
++    const QString activity = m_activityInfo->currentActivity();
++    const auto ids = containments.groupList();
++    for (const QString &id : ids) {
++        const KConfigGroup containment = containments.group(id);
++        const QString connector = connectors.value(containment.readEntry("lastScreen", u"-1"_s));
++        if (connector.isEmpty() || !containment.hasKey("wallpaperplugin")) {
++            continue;
++        }
++        // Desktops belong to an activity; panels and the system tray don't, but carry the same keys.
++        const QString containmentActivity = containment.readEntry("activityId", QString());
++        if (containmentActivity.isEmpty() || (!activity.isEmpty() && containmentActivity != activity)) {
++            continue;
++        }
++
++        const QString plugin = containment.readEntry("wallpaperplugin", QString());
++        const KConfigGroup general = containment.group(u"Wallpaper"_s).group(plugin).group(u"General"_s);
++        Screen screen;
++        screen.fillMode = general.readEntry("FillMode", 2);
++        screen.color = general.readEntry("Color", QColor(Qt::black));
++        if (plugin == s_perDesktopPlugin) {
++            const auto entries = general.readEntry("CurrentImages", QStringList());
++            for (const QString &entry : entries) {
++                const qsizetype at = entry.indexOf(u'=');
++                if (at > 0) {
++                    screen.images.insert(entry.left(at), QUrl(entry.mid(at + 1)));
++                }
++            }
++        } else if (plugin == s_imagePlugin) {
++            screen.image = resolvePackage(QUrl(general.readEntry("Image", QString())));
++            if (screen.image.isEmpty()) {
++                continue;
++            }
++        } else {
++            // A slideshow, a picture of the day, an animated wallpaper: only its window knows.
++            continue;
++        }
++        screens.insert(connector, screen);
++    }
++
++    m_screens = screens;
++    ++m_revision;
++    Q_EMIT revisionChanged();
++}
++
++int DesktopWallpapers::revision() const
++{
++    return m_revision;
++}
++
++bool DesktopWallpapers::known(const QString &screenName) const
++{
++    return m_screens.contains(screenName);
++}
++
++QUrl DesktopWallpapers::image(const QString &screenName, const QString &desktopId) const
++{
++    const auto it = m_screens.constFind(screenName);
++    if (it == m_screens.constEnd()) {
++        return QUrl();
++    }
++    return it->images.value(desktopId, it->image);
++}
++
++int DesktopWallpapers::fillMode(const QString &screenName) const
++{
++    return m_screens.value(screenName).fillMode;
++}
++
++QColor DesktopWallpapers::color(const QString &screenName) const
++{
++    return m_screens.value(screenName).color;
++}
++
++#include "moc_desktopwallpapers.cpp"
+diff --git a/applets/pager/desktopwallpapers.h b/applets/pager/desktopwallpapers.h
+new file mode 100644
+index 0000000000..aa758ebd0a
+--- /dev/null
++++ b/applets/pager/desktopwallpapers.h
+@@ -0,0 +1,70 @@
++/*
++    SPDX-FileCopyrightText: 2026 sneezeparty <38020091+sneezeparty@users.noreply.github.com>
++    SPDX-License-Identifier: GPL-2.0-or-later
++*/
++
++#pragma once
++
++#include <QColor>
++#include <QFileSystemWatcher>
++#include <QHash>
++#include <QObject>
++#include <QTimer>
++#include <QUrl>
++#include <qqmlregistration.h>
++
++namespace TaskManager
++{
++class ActivityInfo;
++}
++
++/**
++ * Tells the pager which wallpaper each screen shows on each virtual desktop, by
++ * reading the desktop containments' wallpaper configuration.
++ *
++ * The desktop background is a single window that is on every virtual desktop, so
++ * a wallpaper that differs per desktop can't be seen in the windows of a desktop
++ * that isn't the current one; the pager has to draw the image itself.
++ */
++class DesktopWallpapers : public QObject
++{
++    Q_OBJECT
++    QML_ELEMENT
++
++    /** Changes whenever any of the answers below may have changed. */
++    Q_PROPERTY(int revision READ revision NOTIFY revisionChanged)
++
++public:
++    explicit DesktopWallpapers(QObject *parent = nullptr);
++
++    int revision() const;
++
++    /** Whether the wallpaper of the screen is of a kind whose image is known. */
++    Q_INVOKABLE bool known(const QString &screenName) const;
++    /** The image the screen shows on the virtual desktop, empty if there is none. */
++    Q_INVOKABLE QUrl image(const QString &screenName, const QString &desktopId) const;
++    /** The QtQuick Image.fillMode the wallpaper uses on the screen. */
++    Q_INVOKABLE int fillMode(const QString &screenName) const;
++    /** The colour behind images that don't cover the screen. */
++    Q_INVOKABLE QColor color(const QString &screenName) const;
++
++Q_SIGNALS:
++    void revisionChanged();
++
++private:
++    struct Screen {
++        QHash<QString, QUrl> images; // by virtual desktop id
++        QUrl image; // for every desktop without an entry above
++        int fillMode = 2;
++        QColor color = Qt::black;
++    };
++
++    void reload();
++    void watch();
++
++    QHash<QString, Screen> m_screens; // by connector name
++    QFileSystemWatcher m_watcher;
++    QTimer m_reloadTimer;
++    TaskManager::ActivityInfo *const m_activityInfo;
++    int m_revision = 0;
++};
+diff --git a/applets/pager/main.xml b/applets/pager/main.xml
+index 456a2f514f..5979bbd84e 100644
+--- a/applets/pager/main.xml
++++ b/applets/pager/main.xml
+@@ -27,6 +27,14 @@
+       <label>Whether to show live thumbnails of the virtual desktops.</label>
+       <default>false</default>
+     </entry>
++    <entry name="showWallpaper" type="Bool">
++      <label>Whether to show the wallpaper of each virtual desktop.</label>
++      <default>true</default>
++    </entry>
++    <entry name="showOutlinesOverThumbnails" type="Bool">
++      <label>Whether to draw the window outlines on top of live thumbnails.</label>
++      <default>false</default>
++    </entry>
+     <entry name="showOnlyCurrentScreen" type="Bool">
+       <label>Whether to limit the Pager to the set of windows and the geometry of the screen the widget resides on.</label>
+       <default>false</default>
+diff --git a/applets/pager/qml/configGeneral.qml b/applets/pager/qml/configGeneral.qml
+index 04b40c1127..369a0c8852 100644
+--- a/applets/pager/qml/configGeneral.qml
++++ b/applets/pager/qml/configGeneral.qml
+@@ -21,7 +21,9 @@ KCM.SimpleKCM {
+     property alias cfg_showWindowIcons: showWindowIcons.checked
+     property int cfg_currentDesktopSelected
+     property alias cfg_pagerLayout: pagerLayout.currentIndex
+-    property alias cfg_showThumbnails: showThumbnails.checked
++    property bool cfg_showThumbnails
++    property alias cfg_showWallpaper: showWallpaper.checked
++    property alias cfg_showOutlinesOverThumbnails: showOutlinesOverThumbnails.checked
+     property alias cfg_showOnlyCurrentScreen: showOnlyCurrentScreen.checked
+     property alias cfg_wrapPage: wrapPage.checked
+ 
+@@ -34,24 +36,60 @@ KCM.SimpleKCM {
+             id: currentDesktopSelectedGroup
+         }
+ 
++        QQC2.ButtonGroup {
++            id: tileStyleGroup
++        }
++
++        QQC2.RadioButton {
++            Kirigami.FormData.label: i18nc("@title:group prefix for radio button group", "Desktops show:") // qmllint disable unqualified
++            visible: !root.isActivityPager
++            QQC2.ButtonGroup.group: tileStyleGroup
++            text: i18nc("@option:radio what each desktop in the pager shows", "Window outlines") // qmllint disable unqualified
++            checked: !root.cfg_showThumbnails
++            onToggled: if (checked) root.cfg_showThumbnails = false;
++        }
++
++        QQC2.RadioButton {
++            visible: !root.isActivityPager
++            QQC2.ButtonGroup.group: tileStyleGroup
++            text: i18nc("@option:radio what each desktop in the pager shows", "Live thumbnails of the windows") // qmllint disable unqualified
++            checked: root.cfg_showThumbnails
++            onToggled: if (checked) root.cfg_showThumbnails = true;
++        }
++
++        QQC2.CheckBox {
++            id: showWallpaper
++            visible: !root.isActivityPager
++            text: i18nc("@option:check", "Show each desktop's wallpaper") // qmllint disable unqualified
++        }
++
++        Item {
++            Kirigami.FormData.isSection: true
++            visible: !root.isActivityPager
++        }
++
+         QQC2.CheckBox {
+             id: showWindowOutlines
+ 
+             Kirigami.FormData.label: i18nc("@title:group prefix for checkbox group", "General:") // qmllint disable unqualified
+ 
++            visible: root.isActivityPager || !root.cfg_showThumbnails
+             text: i18nc("@option:check", "Show window outlines") // qmllint disable unqualified
+         }
+ 
+         QQC2.CheckBox {
+-            id: showWindowIcons
+-            text: i18nc("@option:check", "Show application icons on window outlines") // qmllint disable unqualified
+-            enabled: showWindowOutlines.checked
++            id: showOutlinesOverThumbnails
++
++            Kirigami.FormData.label: i18nc("@title:group prefix for checkbox group", "General:") // qmllint disable unqualified
++
++            visible: !showWindowOutlines.visible
++            text: i18nc("@option:check", "Show window outlines over the thumbnails") // qmllint disable unqualified
+         }
+ 
+         QQC2.CheckBox {
+-            id: showThumbnails
+-            text: i18nc("@option:check", "Show live desktop thumbnails") // qmllint disable unqualified
+-            visible: !root.isActivityPager
++            id: showWindowIcons
++            text: i18nc("@option:check", "Show application icons on window outlines") // qmllint disable unqualified
++            enabled: showWindowOutlines.visible ? showWindowOutlines.checked : showOutlinesOverThumbnails.checked
+         }
+ 
+         QQC2.CheckBox {
+diff --git a/applets/pager/qml/main.qml b/applets/pager/qml/main.qml
+index db785f89d9..69f0f56264 100644
+--- a/applets/pager/qml/main.qml
++++ b/applets/pager/qml/main.qml
+@@ -8,7 +8,6 @@
+ pragma ComponentBehavior: Bound
+ 
+ import QtQuick
+-import QtQuick.Effects
+ import QtQuick.Layouts
+ import org.kde.plasma.plasmoid
+ import org.kde.plasma.core as PlasmaCore
+@@ -136,6 +135,10 @@ PlasmoidItem {
+         }
+     }
+ 
++    DesktopWallpapers {
++        id: wallpapers
++    }
++
+     PagerModel {
+         id: pagerModel
+ 
+@@ -394,8 +397,8 @@ PlasmoidItem {
+                 component PagerFrame : KSvg.FrameSvgItem {
+                     anchors.fill: parent
+                     imagePath: "widgets/pager"
+-                    // Don't bury a live thumbnail under the frame
+-                    opacity: (desktop.state === usedPrefix ? 1 : 0) * (thumbnailLoader.live ? 0.35 : 1)
++                    // Don't bury a live thumbnail or the wallpaper under the frame
++                    opacity: (desktop.state === usedPrefix ? 1 : 0) * (thumbnailLoader.live || wallpaperLayer.active ? 0.35 : 1)
+                 }
+ 
+                 PagerFrame {
+@@ -465,75 +468,82 @@ PlasmoidItem {
+                     width: desktop.width - 2 * x
+                     height: desktop.height - 2 * y
+ 
++                    // The wallpaper of this desktop on each screen. There is only one desktop
++                    // window for all virtual desktops, so its picture can't be taken from the
++                    // windows of a desktop that isn't shown; it is drawn here instead.
++                    Item {
++                        id: wallpaperLayer
++
++                        readonly property var screens: Plasmoid.configuration.showOnlyCurrentScreen ? [root.Screen] : Qt.application.screens
++                        // Only when every screen's wallpaper is known; a mix would look broken
++                        readonly property bool active: Plasmoid.configuration.showWallpaper && !root.isActivityPager
++                            && desktop.desktopId !== "" && wallpapers.revision >= 0
++                            && screens.length > 0 && screens.every(screen => wallpapers.known(screen.name))
++                        readonly property real originX: Plasmoid.configuration.showOnlyCurrentScreen ? root.Screen.virtualX
++                            : Math.min(...Qt.application.screens.map(screen => screen.virtualX))
++                        readonly property real originY: Plasmoid.configuration.showOnlyCurrentScreen ? root.Screen.virtualY
++                            : Math.min(...Qt.application.screens.map(screen => screen.virtualY))
++                        readonly property real scaleX: width / pagerModel.pagerItemSize.width
++                        readonly property real scaleY: height / pagerModel.pagerItemSize.height
++
++                        anchors.fill: parent
++                        z: -1 // Below the thumbnail and the window rectangles
++
++                        Repeater {
++                            model: wallpaperLayer.active ? wallpaperLayer.screens : []
++
++                            Rectangle {
++                                id: screenWallpaper
++
++                                required property var modelData
++                                readonly property string screenName: modelData.name
++
++                                x: Math.round((modelData.virtualX - wallpaperLayer.originX) * wallpaperLayer.scaleX)
++                                y: Math.round((modelData.virtualY - wallpaperLayer.originY) * wallpaperLayer.scaleY)
++                                width: Math.round(modelData.width * wallpaperLayer.scaleX)
++                                height: Math.round(modelData.height * wallpaperLayer.scaleY)
++                                color: wallpapers.revision >= 0 ? wallpapers.color(screenName) : "black"
++                                clip: true
++
++                                Image {
++                                    anchors.fill: parent
++                                    source: wallpapers.revision >= 0 ? wallpapers.image(screenWallpaper.screenName, desktop.desktopId) : ""
++                                    fillMode: wallpapers.revision >= 0 ? wallpapers.fillMode(screenWallpaper.screenName) : Image.PreserveAspectCrop
++                                    // Tiles are small; decode at a size that still looks sharp on dense screens
++                                    sourceSize: Qt.size(Math.max(1, width) * root.Screen.devicePixelRatio * 2, Math.max(1, height) * root.Screen.devicePixelRatio * 2)
++                                    asynchronous: true
++                                    cache: true
++                                    smooth: true
++                                }
++                            }
++                        }
++                    }
++
+                     Loader {
+                         id: thumbnailLoader
+ 
+                         // Whether a thumbnail is being shown, the window rectangles
+-                        // then only act as invisible drag handles.
+-                        readonly property bool live: (item as DesktopThumbnail)?.ready ?? false
++                        // then only act as invisible drag handles unless asked otherwise.
++                        readonly property bool live: (item as PipeWire.PipeWireSourceItem)?.ready ?? false
+ 
+                         anchors.fill: parent
+                         z: 0 // Below the window rectangles
+                         active: Plasmoid.configuration.showThumbnails && !root.isActivityPager
+                             && desktop.desktopId !== "" && clipRect.width > 0 && clipRect.height > 0
+ 
+-                        component DesktopThumbnail: Item {
+-                            id: thumbnail
+-
+-                            readonly property alias ready: stream.ready
+-                            // The stream has no alpha channel, so with several screens
+-                            // the areas that no screen covers have to be cut out.
+-                            readonly property bool masked: !Plasmoid.configuration.showOnlyCurrentScreen
+-                                && Qt.application.screens.length > 1
+-
+-                            PipeWire.PipeWireSourceItem {
+-                                id: stream
+-                                anchors.fill: parent
+-                                // The item has to stay visible, it stops its stream otherwise
+-                                layer.enabled: thumbnail.masked
+-                                layer.effect: MultiEffect {
+-                                    maskEnabled: true
+-                                    maskSource: screensMask
+-                                }
+-                                nodeId: desktopStream.nodeId
+-
+-                                TaskManager.ScreencastingRequest {
+-                                    id: desktopStream
+-                                    desktopId: desktop.desktopId
+-                                    outputName: Plasmoid.configuration.showOnlyCurrentScreen ? root.Screen.name : ""
+-                                    maxSize: Qt.size(Math.ceil(clipRect.width * root.Screen.devicePixelRatio),
+-                                                     Math.ceil(clipRect.height * root.Screen.devicePixelRatio))
+-                                }
+-                            }
+-
+-                            Item {
+-                                id: screensMask
+-                                anchors.fill: parent
+-                                visible: false
+-                                layer.enabled: thumbnail.masked
+-
+-                                readonly property real originX: Math.min(...Qt.application.screens.map(screen => screen.virtualX))
+-                                readonly property real originY: Math.min(...Qt.application.screens.map(screen => screen.virtualY))
+-                                readonly property real scaleX: width / pagerModel.pagerItemSize.width
+-                                readonly property real scaleY: height / pagerModel.pagerItemSize.height
+-
+-                                Repeater {
+-                                    model: thumbnail.masked ? Qt.application.screens : []
+-
+-                                    Rectangle {
+-                                        required property var modelData
+-
+-                                        x: (modelData.virtualX - screensMask.originX) * screensMask.scaleX
+-                                        y: (modelData.virtualY - screensMask.originY) * screensMask.scaleY
+-                                        width: modelData.width * screensMask.scaleX
+-                                        height: modelData.height * screensMask.scaleY
+-                                        color: "black"
+-                                    }
+-                                }
++                        sourceComponent: PipeWire.PipeWireSourceItem {
++                            nodeId: desktopStream.nodeId
++
++                            TaskManager.ScreencastingRequest {
++                                id: desktopStream
++                                desktopId: desktop.desktopId
++                                outputName: Plasmoid.configuration.showOnlyCurrentScreen ? root.Screen.name : ""
++                                maxSize: Qt.size(Math.ceil(clipRect.width * root.Screen.devicePixelRatio),
++                                                 Math.ceil(clipRect.height * root.Screen.devicePixelRatio))
++                                // With the wallpaper drawn above, the stream only has to bring the windows
++                                excludeBackground: wallpaperLayer.active
+                             }
+                         }
+-
+-                        sourceComponent: DesktopThumbnail {}
+                     }
+ 
+                     Repeater {
+@@ -554,6 +564,8 @@ PlasmoidItem {
+                             readonly property bool minimized: model.IsMinimized
+                             readonly property bool isActive: model.IsActive
+                             readonly property int stackingOrder: model.StackingOrder
++                            // Over a live thumbnail the rectangle is only a drag handle, unless outlines are wanted there too
++                            readonly property bool outlined: thumbnailLoader.live ? Plasmoid.configuration.showOutlinesOverThumbnails : Plasmoid.configuration.showWindowOutlines
+                         }
+ 
+                         delegate: WindowDelegate {
+@@ -568,9 +580,9 @@ PlasmoidItem {
+                             y: Math.round(geometry.y * pagerItemGrid.heightScaleFactor) - 1
+                             width: Math.round(geometry.width * pagerItemGrid.widthScaleFactor)
+                             height: Math.round(geometry.height * pagerItemGrid.heightScaleFactor)
+-                            visible: (Plasmoid.configuration.showWindowOutlines || thumbnailLoader.live) && !minimized
++                            visible: (outlined || thumbnailLoader.live) && !minimized
+                             color: {
+-                                if (thumbnailLoader.live) {
++                                if (!outlined) {
+                                     return "transparent";
+                                 } else if (desktop.isCurrent) {
+                                     if (isActive) {
+@@ -587,7 +599,7 @@ PlasmoidItem {
+                                 }
+                             }
+ 
+-                            border.width: thumbnailLoader.live ? 0 : 1
++                            border.width: outlined ? 1 : 0
+                             border.color: isActive
+                                 ? root.windowActiveBorderColor
+                                 : root.windowInactiveBorderColor

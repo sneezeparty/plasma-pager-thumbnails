@@ -1,0 +1,14 @@
+{
+    "KPackageStructure": "Plasma/Wallpaper",
+    "KPlugin": {
+        "Authors": [ { "Email": "38020091+sneezeparty@users.noreply.github.com", "Name": "sneezeparty" } ],
+        "Category": "",
+        "Description": "A different image, or folder of images, on each virtual desktop",
+        "Icon": "preferences-desktop-virtual",
+        "Id": "com.github.sneezeparty.desktopwallpapers",
+        "License": "GPL-2.0-or-later",
+        "Name": "Image per Virtual Desktop",
+        "Version": "0.1"
+    },
+    "X-KDE-ParentApp": "org.kde.plasmashell"
+}

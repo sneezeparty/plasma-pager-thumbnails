@@ -1,0 +1,166 @@
+From d73a15f03f77045002b07908780bd1594266a827 Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 10:41:59 -0700
+Subject: [PATCH 8/8] plugins/screencast: Offer every alpha format for desktop
+ streams, cap hidden updates at 15
+
+A desktop stream needs its alpha channel and offered ARGB8888 only. A
+consumer is not certain to accept that: kpipewire advertises as many of
+its formats as fit in a fixed buffer, in the order of a QHash, so which
+ones are left out differs from one process to the next. When ARGB8888
+was among them, no stream could be negotiated. DMA-BUF streams of a
+source that keeps its alpha channel now also offer ABGR8888 and
+RGBA8888.
+
+Windows that are not on screen update at most 15 times a second, the
+rate of a desktop stream.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ .../screencast/desktopscreencastsource.cpp    |  4 +-
+ src/plugins/screencast/screencastmanager.cpp  |  4 +-
+ src/plugins/screencast/screencaststream.cpp   | 38 ++++++++++++++++---
+ src/plugins/screencast/screencaststream.h     |  4 +-
+ 4 files changed, 39 insertions(+), 11 deletions(-)
+
+diff --git a/src/plugins/screencast/desktopscreencastsource.cpp b/src/plugins/screencast/desktopscreencastsource.cpp
+index ebad7f170a..4a3bec41c4 100644
+--- a/src/plugins/screencast/desktopscreencastsource.cpp
++++ b/src/plugins/screencast/desktopscreencastsource.cpp
+@@ -309,9 +309,7 @@ uint DesktopScreenCastSource::refreshRate() const
+             ret = std::max<uint>(ret, output->refreshRate());
+         }
+     }
+-    // No point in a stream slower than the windows it shows are asked to draw
+-    const uint hiddenRate = 1'000'000 / std::max<int>(1, m_hiddenInterval.count());
+-    return std::min(ret, std::max(s_maxRefreshRate, hiddenRate));
++    return std::min(ret, s_maxRefreshRate);
+ }
+ 
+ void DesktopScreenCastSource::setRenderCursor(bool enable)
+diff --git a/src/plugins/screencast/screencastmanager.cpp b/src/plugins/screencast/screencastmanager.cpp
+index 53e272b596..dbd0dfa602 100644
+--- a/src/plugins/screencast/screencastmanager.cpp
++++ b/src/plugins/screencast/screencastmanager.cpp
+@@ -126,9 +126,9 @@ void ScreencastManager::streamDesktop(ScreencastStreamV1Interface *waylandStream
+     }
+ 
+     // Once a second keeps a thumbnail roughly up to date at next to no cost. More is the
+-    // client's choice, up to a rate that is still plenty for something this small.
++    // client's choice, but never more than a desktop stream itself delivers.
+     static const uint s_defaultHiddenRefreshRate = 1;
+-    static const uint s_maxHiddenRefreshRate = 30;
++    static const uint s_maxHiddenRefreshRate = 15;
+     const uint hiddenRate = hiddenRefreshRate == 0 ? s_defaultHiddenRefreshRate : std::min(hiddenRefreshRate, s_maxHiddenRefreshRate);
+ 
+     auto source = new DesktopScreenCastSource(desktop, logicalOutput, clampScaledSize(maxSize), excludeBackground, hiddenRate);
+diff --git a/src/plugins/screencast/screencaststream.cpp b/src/plugins/screencast/screencaststream.cpp
+index 64724e2a56..cb62926acb 100644
+--- a/src/plugins/screencast/screencaststream.cpp
++++ b/src/plugins/screencast/screencaststream.cpp
+@@ -246,6 +246,19 @@ void ScreenCastStream::onStreamParamChanged(uint32_t id, const struct spa_pod *f
+             receivedModifiers.insert(values[i]);
+         }
+ 
++        // The consumer may have settled on one of the alternatives. From here on that is the format.
++        const quint32 negotiatedFormat = spaVideoFormatToDrmFormat(m_videoFormat.format);
++        if (negotiatedFormat != m_drmFormat) {
++            for (auto &alternative : m_alternativeFormats) {
++                if (alternative.first == negotiatedFormat) {
++                    std::swap(alternative.first, m_drmFormat);
++                    std::swap(alternative.second, m_modifiers);
++                    m_dmabufParams.reset();
++                    break;
++                }
++            }
++        }
++
+         if (!m_dmabufParams || m_dmabufParams->width != m_resolution.width() || m_dmabufParams->height != m_resolution.height() || !receivedModifiers.contains(m_dmabufParams->modifier)) {
+             // DRM_MOD_INVALID should be used as a last option. Do not just remove it it's the only
+             // item on the list
+@@ -264,7 +277,7 @@ void ScreenCastStream::onStreamParamChanged(uint32_t id, const struct spa_pod *f
+             }
+ 
+             qCDebug(KWIN_SCREENCAST) << objectName() << "Stream dmabuf modifiers received, offering our best suited modifier" << m_dmabufParams.has_value();
+-            char buffer[2048];
++            char buffer[4096];
+             auto params = buildFormats(m_dmabufParams.has_value(), buffer);
+             pw_stream_update_params(m_pwStream, params.data(), params.count());
+             return;
+@@ -433,7 +446,19 @@ bool ScreenCastStream::createStream()
+     }
+     m_hasDmaBuf = testCreateDmaBuf(m_resolution, m_drmFormat, m_modifiers).has_value();
+ 
+-    char buffer[2048];
++    // A source that needs its alpha channel can't fall back to the same format without one,
++    // as other sources do. A consumer is not certain to accept any one format, though: offer
++    // every one with an alpha channel that buffers can be made in.
++    if (m_hasDmaBuf && m_source->keepAlpha()) {
++        for (const quint32 format : {DRM_FORMAT_ARGB8888, DRM_FORMAT_ABGR8888, DRM_FORMAT_RGBA8888}) {
++            const auto it = supported.constFind(format);
++            if (format != m_drmFormat && it != supported.constEnd() && testCreateDmaBuf(m_resolution, format, *it).has_value()) {
++                m_alternativeFormats.append({format, *it});
++            }
++        }
++    }
++
++    char buffer[4096];
+     QList<const spa_pod *> params = buildFormats(false, buffer);
+ 
+     pw_stream_add_listener(m_pwStream, &m_streamListener, &m_pwStreamEvents, this);
+@@ -689,7 +714,7 @@ void ScreenCastStream::resize(const QSize &resolution)
+     }
+     m_resolution = resolution;
+ 
+-    char buffer[2048];
++    char buffer[4096];
+     auto params = buildFormats(false, buffer);
+     pw_stream_update_params(m_pwStream, params.data(), params.count());
+ }
+@@ -745,12 +770,12 @@ void ScreenCastStream::invalidateCursor()
+     m_cursor.invalid = true;
+ }
+ 
+-QList<const spa_pod *> ScreenCastStream::buildFormats(bool fixate, char buffer[2048])
++QList<const spa_pod *> ScreenCastStream::buildFormats(bool fixate, char buffer[4096])
+ {
+     const auto dmabufFormat = drmFormatToSpaVideoFormat(m_drmFormat);
+     const auto shmFormat = drmFormatToSpaVideoFormat(DRM_FORMAT_ARGB8888);
+ 
+-    spa_pod_builder podBuilder = SPA_POD_BUILDER_INIT(buffer, 2048);
++    spa_pod_builder podBuilder = SPA_POD_BUILDER_INIT(buffer, 4096);
+     spa_fraction defFramerate = SPA_FRACTION(0, 1);
+     spa_fraction minFramerate = SPA_FRACTION(0, 1);
+     spa_fraction maxFramerate = SPA_FRACTION(m_source->refreshRate() / 1000, 1);
+@@ -763,6 +788,9 @@ QList<const spa_pod *> ScreenCastStream::buildFormats(bool fixate, char buffer[2
+             params.append(buildFormat(&podBuilder, dmabufFormat, &resolution, &defFramerate, &minFramerate, &maxFramerate, {m_dmabufParams->modifier}, SPA_POD_PROP_FLAG_MANDATORY));
+         }
+         params.append(buildFormat(&podBuilder, dmabufFormat, &resolution, &defFramerate, &minFramerate, &maxFramerate, m_modifiers, SPA_POD_PROP_FLAG_MANDATORY | SPA_POD_PROP_FLAG_DONT_FIXATE));
++        for (const auto &[format, modifiers] : m_alternativeFormats) {
++            params.append(buildFormat(&podBuilder, drmFormatToSpaVideoFormat(format), &resolution, &defFramerate, &minFramerate, &maxFramerate, modifiers, SPA_POD_PROP_FLAG_MANDATORY | SPA_POD_PROP_FLAG_DONT_FIXATE));
++        }
+     }
+     params.append(buildFormat(&podBuilder, shmFormat, &resolution, &defFramerate, &minFramerate, &maxFramerate, {}, 0));
+     return params;
+diff --git a/src/plugins/screencast/screencaststream.h b/src/plugins/screencast/screencaststream.h
+index d0af11d647..612da9c2fb 100644
+--- a/src/plugins/screencast/screencaststream.h
++++ b/src/plugins/screencast/screencaststream.h
+@@ -88,7 +88,7 @@ private:
+     void onStreamRemoveBuffer(pw_buffer *buffer);
+ 
+     bool createStream();
+-    QList<const spa_pod *> buildFormats(bool fixate, char buffer[2048]);
++    QList<const spa_pod *> buildFormats(bool fixate, char buffer[4096]);
+     void updateParams();
+     void resize(const QSize &resolution);
+     void coreFailed(const QString &errorMessage);
+@@ -120,6 +120,8 @@ private:
+     spa_video_info_raw m_videoFormat;
+     QString m_error;
+     ModifierList m_modifiers;
++    // Other formats a dmabuf can have if the consumer can't take m_drmFormat, with their modifiers
++    QList<std::pair<quint32, ModifierList>> m_alternativeFormats;
+     std::optional<ScreenCastDmaBufTextureParams> m_dmabufParams; // when fixated
+ 
+     struct

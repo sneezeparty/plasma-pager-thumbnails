@@ -1,0 +1,132 @@
+From 9ca6dec44395d069d34f32611288080ec7a5ead5 Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 06:04:35 -0700
+Subject: [PATCH 2/4] libtaskmanager: Add
+ ScreencastingRequest.excludeBackground
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ libtaskmanager/screencasting.cpp        |  4 ++--
+ libtaskmanager/screencasting.h          |  5 +++--
+ libtaskmanager/screencastingrequest.cpp | 18 +++++++++++++++++-
+ libtaskmanager/screencastingrequest.h   | 11 +++++++++++
+ 4 files changed, 33 insertions(+), 5 deletions(-)
+
+diff --git a/libtaskmanager/screencasting.cpp b/libtaskmanager/screencasting.cpp
+index c60aeb2384..42619fb3ab 100644
+--- a/libtaskmanager/screencasting.cpp
++++ b/libtaskmanager/screencasting.cpp
+@@ -106,7 +106,7 @@ std::unique_ptr<ScreencastingStream> Screencasting::createWindowStream(const QSt
+     return stream;
+ }
+ 
+-std::unique_ptr<ScreencastingStream> Screencasting::createDesktopStream(const QString &desktopId, const QString &outputName, const QSize &maxSize, pointer mode)
++std::unique_ptr<ScreencastingStream> Screencasting::createDesktopStream(const QString &desktopId, const QString &outputName, const QSize &maxSize, bool excludeBackground, pointer mode)
+ {
+     if (!isActive() || maxSize.isEmpty()) {
+         return nullptr;
+@@ -125,7 +125,7 @@ std::unique_ptr<ScreencastingStream> Screencasting::createDesktopStream(const QS
+ 
+     auto stream = std::make_unique<ScreencastingStream>();
+     stream->setObjectName(desktopId);
+-    stream->init(stream_desktop(desktopId, output, maxSize.width(), maxSize.height(), mode));
++    stream->init(stream_desktop(desktopId, output, maxSize.width(), maxSize.height(), excludeBackground ? desktop_flags_exclude_background : 0, mode));
+     return stream;
+ }
+ 
+diff --git a/libtaskmanager/screencasting.h b/libtaskmanager/screencasting.h
+index bb3c5c229e..297a898733 100644
+--- a/libtaskmanager/screencasting.h
++++ b/libtaskmanager/screencasting.h
+@@ -56,9 +56,10 @@ public:
+     /**
+      * Requests a stream showing the virtual desktop @p desktopId, scaled down to fit
+      * inside @p maxSize (in buffer pixels). If @p outputName is empty the stream
+-     * covers the whole workspace. Returns nullptr if the compositor doesn't support it.
++     * covers the whole workspace. With @p excludeBackground the desktop background is left
++     * transparent. Returns nullptr if the compositor doesn't support it.
+      */
+-    std::unique_ptr<ScreencastingStream> createDesktopStream(const QString &desktopId, const QString &outputName, const QSize &maxSize, pointer mode);
++    std::unique_ptr<ScreencastingStream> createDesktopStream(const QString &desktopId, const QString &outputName, const QSize &maxSize, bool excludeBackground, pointer mode);
+ 
+ private:
+     wl_output *findOutput(const QString &outputName) const;
+diff --git a/libtaskmanager/screencastingrequest.cpp b/libtaskmanager/screencastingrequest.cpp
+index ab42107b75..0e5da58898 100644
+--- a/libtaskmanager/screencastingrequest.cpp
++++ b/libtaskmanager/screencastingrequest.cpp
+@@ -95,6 +95,22 @@ QSize ScreencastingRequest::maxSize() const
+     return m_maxSize;
+ }
+ 
++void ScreencastingRequest::setExcludeBackground(bool exclude)
++{
++    if (m_excludeBackground == exclude) {
++        return;
++    }
++
++    m_excludeBackground = exclude;
++    Q_EMIT excludeBackgroundChanged(exclude);
++    scheduleUpdate();
++}
++
++bool ScreencastingRequest::excludeBackground() const
++{
++    return m_excludeBackground;
++}
++
+ void ScreencastingRequest::scheduleUpdate()
+ {
+     // The properties that describe a stream are set one at a time, wait until
+@@ -120,7 +136,7 @@ void ScreencastingRequest::update()
+     }
+ 
+     if (!m_desktopId.isEmpty()) {
+-        setStream(m_screenCasting->createDesktopStream(m_desktopId, m_outputName, m_maxSize, Screencasting::pointer_hidden));
++        setStream(m_screenCasting->createDesktopStream(m_desktopId, m_outputName, m_maxSize, m_excludeBackground, Screencasting::pointer_hidden));
+     } else if (!m_uuid.isEmpty()) {
+         setStream(m_screenCasting->createWindowStream(m_uuid, m_maxSize, Screencasting::pointer_hidden));
+     } else {
+diff --git a/libtaskmanager/screencastingrequest.h b/libtaskmanager/screencastingrequest.h
+index 1e4c45978d..73b8f99dab 100644
+--- a/libtaskmanager/screencastingrequest.h
++++ b/libtaskmanager/screencastingrequest.h
+@@ -51,6 +51,12 @@ class ScreencastingRequest : public QObject
+      */
+     Q_PROPERTY(QSize maxSize READ maxSize WRITE setMaxSize NOTIFY maxSizeChanged)
+ 
++    /**
++     * For a desktop stream: leave the desktop background out, so that the
++     * stream only shows the windows on a transparent background.
++     */
++    Q_PROPERTY(bool excludeBackground READ excludeBackground WRITE setExcludeBackground NOTIFY excludeBackgroundChanged)
++
+     /** The offered nodeId to give to a source */
+     Q_PROPERTY(quint32 nodeId READ nodeId NOTIFY nodeIdChanged)
+     Q_PROPERTY(quint64 objectSerial READ objectSerial NOTIFY objectSerialChanged)
+@@ -73,6 +79,9 @@ public:
+     void setMaxSize(const QSize &maxSize);
+     QSize maxSize() const;
+ 
++    void setExcludeBackground(bool exclude);
++    bool excludeBackground() const;
++
+     quint32 nodeId() const;
+     quint64 objectSerial() const;
+ 
+@@ -82,6 +91,7 @@ Q_SIGNALS:
+     void outputNameChanged(const QString &outputNames);
+     void desktopIdChanged(const QString &desktopId);
+     void maxSizeChanged(const QSize &maxSize);
++    void excludeBackgroundChanged(bool exclude);
+     void objectSerialChanged(quint64 objectSerial);
+ 
+ private:
+@@ -96,6 +106,7 @@ private:
+     QString m_outputName;
+     QString m_desktopId;
+     QSize m_maxSize;
++    bool m_excludeBackground = false;
+     bool m_updateScheduled = false;
+     quint32 m_nodeId = 0;
+     quint64 m_objectSerial = 0;
