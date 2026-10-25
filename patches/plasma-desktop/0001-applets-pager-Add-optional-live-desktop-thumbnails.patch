@@ -1,7 +1,7 @@
-From 4258282275499b3b1f89c4b03d9f34cc600cc29d Mon Sep 17 00:00:00 2001
+From 863459a5c04cf66e02ef71b211eb192976c7978b Mon Sep 17 00:00:00 2001
 From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
 Date: Thu, 8 Oct 2026 17:57:56 -0700
-Subject: [PATCH 1/7] applets/pager: Add optional live desktop thumbnails
+Subject: [PATCH 1/8] applets/pager: Add optional live desktop thumbnails
 
 Uses the desktop streams from zkde_screencast_unstable_v1 version 7; falls back to window outlines when the compositor doesn't offer them.
 

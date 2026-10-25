@@ -1,4 +1,4 @@
-From fc75885234eac71e9dfbb431ddd14bcb00dd5808 Mon Sep 17 00:00:00 2001
+From 05eb2f5152dd64c50ab39818a08ab18e1354afe5 Mon Sep 17 00:00:00 2001
 From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
 Date: Thu, 8 Oct 2026 17:57:56 -0700
 Subject: [PATCH 1/4] libtaskmanager: Support scaled window streams and desktop

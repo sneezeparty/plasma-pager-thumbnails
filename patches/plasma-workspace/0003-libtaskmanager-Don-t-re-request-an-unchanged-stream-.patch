@@ -1,4 +1,4 @@
-From fd45ea252dcd7aa32105a5cdb6d499e6984dc5d9 Mon Sep 17 00:00:00 2001
+From de687e50373709c531716f46133c45b23afa9e65 Mon Sep 17 00:00:00 2001
 From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
 Date: Fri, 9 Oct 2026 07:49:21 -0700
 Subject: [PATCH 3/4] libtaskmanager: Don't re-request an unchanged stream,

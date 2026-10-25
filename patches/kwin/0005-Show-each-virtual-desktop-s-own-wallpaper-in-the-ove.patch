@@ -1,4 +1,4 @@
-From d3a02b146d243ddb0e58f2fb4a0589b776b41176 Mon Sep 17 00:00:00 2001
+From 1105db7d5772ecef133f3338da416328ff73c2e8 Mon Sep 17 00:00:00 2001
 From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
 Date: Fri, 9 Oct 2026 06:13:15 -0700
 Subject: [PATCH 5/8] Show each virtual desktop's own wallpaper in the overview

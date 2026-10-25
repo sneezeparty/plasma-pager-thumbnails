@@ -1,7 +1,7 @@
-From 3ba19eb3d0002ed6db1c28bdf2ba884661f5f769 Mon Sep 17 00:00:00 2001
+From 6d5fe6e5a4c0bd141160bc5c22384639714a2042 Mon Sep 17 00:00:00 2001
 From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
 Date: Fri, 9 Oct 2026 07:49:21 -0700
-Subject: [PATCH 5/7] applets/pager: Fixes for live thumbnails
+Subject: [PATCH 5/8] applets/pager: Fixes for live thumbnails
 
 - A click on a tile no longer resets the model, which restarted every
   desktop's stream.

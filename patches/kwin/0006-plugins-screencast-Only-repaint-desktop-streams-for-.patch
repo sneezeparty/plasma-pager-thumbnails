@@ -1,4 +1,4 @@
-From f722b37f7582c4f51e175f51e97e8559fcbe0c15 Mon Sep 17 00:00:00 2001
+From 0b2d3e85e2ab512b67edf9dc07645521bf600192 Mon Sep 17 00:00:00 2001
 From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
 Date: Fri, 9 Oct 2026 07:49:21 -0700
 Subject: [PATCH 6/8] plugins/screencast: Only repaint desktop streams for

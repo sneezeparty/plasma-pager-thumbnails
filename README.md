@@ -22,7 +22,7 @@ plasma-wayland-protocols, kwin, plasma-workspace and plasma-desktop.
 </p>
 
 This is a prototype. It is not part of KDE and has not been submitted there. The patches
-apply to Plasma 6.7.4.
+apply to Plasma 6.7.5.
 
 ## Contents
 
@@ -51,7 +51,7 @@ every desktop. The patches fix that.
 ## Patches
 
 Each directory under `patches/` is a commit series. Apply it with `git am` to the matching
-KDE repository at tag `v6.7.4`. For plasma-wayland-protocols the base is commit `e14966e`.
+KDE repository at tag `v6.7.5`. For plasma-wayland-protocols the base is commit `e14966e`.
 Build and install the protocol first; the other three find it through `CMAKE_PREFIX_PATH`.
 
 | Series | Adds |

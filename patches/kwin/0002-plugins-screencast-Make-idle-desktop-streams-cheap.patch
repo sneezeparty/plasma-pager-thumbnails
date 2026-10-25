@@ -1,4 +1,4 @@
-From 41b1e2e869a5c203309095493e046521d59d5505 Mon Sep 17 00:00:00 2001
+From 9de9fc45193c2db0f1e7ad9b6213bac6759a5b48 Mon Sep 17 00:00:00 2001
 From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
 Date: Thu, 8 Oct 2026 18:06:59 -0700
 Subject: [PATCH 2/8] plugins/screencast: Make idle desktop streams cheap
@@ -47,10 +47,10 @@ index 5c0568822e..daf7fe77cf 100644
  }
  
 diff --git a/src/window.cpp b/src/window.cpp
-index aedd275a55..de1abd8153 100644
+index e620a02ba6..e082a2732f 100644
 --- a/src/window.cpp
 +++ b/src/window.cpp
-@@ -4469,26 +4469,54 @@ bool Window::isLockScreenOverlay() const
+@@ -4474,26 +4474,54 @@ bool Window::isLockScreenOverlay() const
  
  void Window::refOffscreenRendering()
  {
@@ -111,7 +111,7 @@ index aedd275a55..de1abd8153 100644
  }
  
  void Window::maybeSendFrameCallback()
-@@ -4498,7 +4526,9 @@ void Window::maybeSendFrameCallback()
+@@ -4503,7 +4531,9 @@ void Window::maybeSendFrameCallback()
          const auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch());
          m_windowItem->framePainted(nullptr, output(), nullptr, timestamp);
          // update refresh rate, it might have changed
@@ -123,10 +123,10 @@ index aedd275a55..de1abd8153 100644
      }
  }
 diff --git a/src/window.h b/src/window.h
-index f1a5283af7..227ab1ca88 100644
+index 3ba8ff50b9..912b4ce5c0 100644
 --- a/src/window.h
 +++ b/src/window.h
-@@ -1396,6 +1396,13 @@ public:
+@@ -1397,6 +1397,13 @@ public:
  
      void refOffscreenRendering();
      void unrefOffscreenRendering();
@@ -140,7 +140,7 @@ index f1a5283af7..227ab1ca88 100644
      bool isOffscreenRendering() const;
  
      qreal targetScale() const;
-@@ -1933,7 +1940,9 @@ protected:
+@@ -1934,7 +1941,9 @@ protected:
      WindowRules m_rules;
      quint32 m_lastUsageSerial = 0;
      bool m_lockScreenOverlay = false;

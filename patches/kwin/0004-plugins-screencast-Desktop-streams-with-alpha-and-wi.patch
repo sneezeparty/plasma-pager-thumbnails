@@ -1,4 +1,4 @@
-From 5d6cf28ed0b5397f15a4bbb24b4fbc10cb0a3808 Mon Sep 17 00:00:00 2001
+From 96d6a41dfd8725ede3dedad81ac8658c3e83854f Mon Sep 17 00:00:00 2001
 From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
 Date: Fri, 9 Oct 2026 06:04:35 -0700
 Subject: [PATCH 4/8] plugins/screencast: Desktop streams with alpha and
@@ -143,10 +143,10 @@ index c15f81259b..d1cc83566a 100644
      virtual void setRenderCursor(bool enable) = 0;
      virtual Region render(GLFramebuffer *target, const Region &bufferRepair) = 0;
 diff --git a/src/plugins/screencast/screencaststream.cpp b/src/plugins/screencast/screencaststream.cpp
-index cb51ca2adf..64724e2a56 100644
+index 022e9658cc..a780f27508 100644
 --- a/src/plugins/screencast/screencaststream.cpp
 +++ b/src/plugins/screencast/screencaststream.cpp
-@@ -785,7 +785,9 @@ spa_pod *ScreenCastStream::buildFormat(struct spa_pod_builder *b, enum spa_video
+@@ -788,7 +788,9 @@ spa_pod *ScreenCastStream::buildFormat(struct spa_pod_builder *b, enum spa_video
                              SPA_POD_Fraction(maxFramerate)),
                          0);
  
@@ -190,10 +190,10 @@ index 7871382183..be2d4d9234 100644
  
  private:
 diff --git a/src/window.cpp b/src/window.cpp
-index de1abd8153..8461720e8c 100644
+index e082a2732f..4d0dd84a38 100644
 --- a/src/window.cpp
 +++ b/src/window.cpp
-@@ -4497,14 +4497,19 @@ void Window::unrefThrottledOffscreenRendering()
+@@ -4502,14 +4502,19 @@ void Window::unrefThrottledOffscreenRendering()
      updateOffscreenRendering(wasOffscreenRendering);
  }
  

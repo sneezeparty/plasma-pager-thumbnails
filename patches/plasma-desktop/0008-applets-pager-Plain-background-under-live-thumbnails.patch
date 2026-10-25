@@ -1,0 +1,54 @@
+From 6e525962bc6d69b9eedb6411aac5f4f62a6e10fc Mon Sep 17 00:00:00 2001
+From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 06:41:35 -0700
+Subject: [PATCH 8/8] applets/pager: Plain background under live thumbnails
+ without the wallpaper, blend alpha frames
+
+---
+ applets/pager/qml/main.qml | 19 +++++++++++++++++--
+ 1 file changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/applets/pager/qml/main.qml b/applets/pager/qml/main.qml
+index 965d455f1e..00306971fa 100644
+--- a/applets/pager/qml/main.qml
++++ b/applets/pager/qml/main.qml
+@@ -553,6 +553,18 @@ PlasmoidItem {
+                         }
+                     }
+ 
++                    // Without the wallpaper, a live thumbnail sits on a plain background from the
++                    // color scheme rather than on the desktop window, which shows the current
++                    // desktop's wallpaper on every desktop.
++                    Rectangle {
++                        anchors.fill: parent
++                        z: -1 // Below the thumbnail and the window rectangles
++                        visible: thumbnailLoader.active && !Plasmoid.configuration.showWallpaper
++                        Kirigami.Theme.colorSet: Kirigami.Theme.Window
++                        Kirigami.Theme.inherit: false
++                        color: Kirigami.Theme.backgroundColor
++                    }
++
+                     Loader {
+                         id: thumbnailLoader
+ 
+@@ -569,6 +581,9 @@ PlasmoidItem {
+                             nodeId: desktopStream.nodeId
+                             // An item that isn't shown pauses its stream
+                             visible: !root.covered
++                            // kpipewire draws RGBA and ABGR frames as opaque, which would write their
++                            // transparent pixels straight through the background. A layer is blended.
++                            layer.enabled: true
+ 
+                             TaskManager.ScreencastingRequest {
+                                 id: desktopStream
+@@ -576,8 +591,8 @@ PlasmoidItem {
+                                 outputName: Plasmoid.configuration.showOnlyCurrentScreen ? root.Screen.name : ""
+                                 maxSize: Qt.size(Math.ceil(clipRect.width * root.Screen.devicePixelRatio),
+                                                  Math.ceil(clipRect.height * root.Screen.devicePixelRatio))
+-                                // With the wallpaper drawn above, the stream only has to bring the windows
+-                                excludeBackground: wallpaperLayer.active
++                                // With the wallpaper or a plain background drawn above, the stream only has to bring the windows
++                                excludeBackground: wallpaperLayer.active || !Plasmoid.configuration.showWallpaper
+                                 hiddenRefreshRate: Math.max(1, Math.min(15, Plasmoid.configuration.hiddenDesktopRefreshRate))
+                             }
+                         }

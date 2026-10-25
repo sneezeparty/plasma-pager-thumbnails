@@ -1,7 +1,7 @@
-From 4f5bc2406ae9c0f200659d81f9d1c36af64d25f1 Mon Sep 17 00:00:00 2001
+From 630af677383b9c320a82d8d944dc8945483622b4 Mon Sep 17 00:00:00 2001
 From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
 Date: Thu, 8 Oct 2026 18:57:18 -0700
-Subject: [PATCH 2/7] applets/pager: Cut out areas no screen covers in desktop
+Subject: [PATCH 2/8] applets/pager: Cut out areas no screen covers in desktop
  thumbnails
 
 The stream has no alpha channel, so with several screens the gaps showed up black.

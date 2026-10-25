@@ -1,7 +1,7 @@
-From 9a7d308f3b3f8df1d51634bfaad5c4889fe2dce4 Mon Sep 17 00:00:00 2001
+From bae1b4e2ea2387605ca9e31d834672ba6db1cad3 Mon Sep 17 00:00:00 2001
 From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
 Date: Fri, 9 Oct 2026 07:03:39 -0700
-Subject: [PATCH 4/7] applets/pager: Ask the shell which screen has which
+Subject: [PATCH 4/8] applets/pager: Ask the shell which screen has which
  number
 
 The wallpaper of a screen was looked up by guessing that Plasma numbers

@@ -1,7 +1,7 @@
-From d6331b4697aa4c39302a71905dcd818703c20ac4 Mon Sep 17 00:00:00 2001
+From 87da71f4d7cb4f3d0b1b4c8b4c95eda41f212ea4 Mon Sep 17 00:00:00 2001
 From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
 Date: Fri, 9 Oct 2026 06:04:35 -0700
-Subject: [PATCH 3/7] applets/pager: Show each desktop's wallpaper, and make
+Subject: [PATCH 3/8] applets/pager: Show each desktop's wallpaper, and make
  outlines over thumbnails optional
 
 The pager draws the wallpaper of each virtual desktop per screen itself, read from the containments' wallpaper configuration, and asks for desktop streams without the background when it does. The settings page offers window outlines or live thumbnails as the tile style.

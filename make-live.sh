@@ -46,7 +46,7 @@ pt_preflight_overlay || { echo "$PT_REASON"; exit 1; }
 # Keep the published patch series in step with what was built
 for repo in kwin plasma-workspace plasma-desktop; do
   rm -rf "$K/patches/$repo"
-  git -C "$K/src/$repo" format-patch -q --no-signature -o "$K/patches/$repo" v6.7.4..HEAD
+  git -C "$K/src/$repo" format-patch -q --no-signature -o "$K/patches/$repo" v6.7.5..HEAD
 done
 
 cat <<EOF

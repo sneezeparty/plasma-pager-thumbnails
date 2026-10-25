@@ -1,4 +1,4 @@
-From 080ddda89f484c6e51dcb23906017643760cfc34 Mon Sep 17 00:00:00 2001
+From 7aa8776d6bdb1166ee2e2a402e4fe38c0170967c Mon Sep 17 00:00:00 2001
 From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
 Date: Fri, 9 Oct 2026 10:24:11 -0700
 Subject: [PATCH 7/8] plugins/screencast: Let the client choose how often
@@ -170,10 +170,10 @@ index be2d4d9234..2524edb77b 100644
  
  private:
 diff --git a/src/window.cpp b/src/window.cpp
-index 8461720e8c..9e29bf7f71 100644
+index 4d0dd84a38..053adb756a 100644
 --- a/src/window.cpp
 +++ b/src/window.cpp
-@@ -4482,34 +4482,28 @@ void Window::unrefOffscreenRendering()
+@@ -4487,34 +4487,28 @@ void Window::unrefOffscreenRendering()
      updateOffscreenRendering(wasOffscreenRendering);
  }
  
@@ -216,7 +216,7 @@ index 8461720e8c..9e29bf7f71 100644
      } else {
          m_offscreenFramecallbackTimer.stop();
      }
-@@ -4521,7 +4515,7 @@ void Window::updateOffscreenRendering(bool wasOffscreenRendering)
+@@ -4526,7 +4520,7 @@ void Window::updateOffscreenRendering(bool wasOffscreenRendering)
  
  bool Window::isOffscreenRendering() const
  {
@@ -226,10 +226,10 @@ index 8461720e8c..9e29bf7f71 100644
  
  void Window::maybeSendFrameCallback()
 diff --git a/src/window.h b/src/window.h
-index 227ab1ca88..94292d78d7 100644
+index 912b4ce5c0..bc1ed137e1 100644
 --- a/src/window.h
 +++ b/src/window.h
-@@ -1401,8 +1401,8 @@ public:
+@@ -1402,8 +1402,8 @@ public:
       * asked to draw about once per second, instead of at the refresh rate of its
       * output. Meant for thumbnails of windows that would otherwise be idle.
       */
@@ -240,7 +240,7 @@ index 227ab1ca88..94292d78d7 100644
      bool isOffscreenRendering() const;
  
      qreal targetScale() const;
-@@ -1942,7 +1942,7 @@ protected:
+@@ -1943,7 +1943,7 @@ protected:
      bool m_lockScreenOverlay = false;
      void updateOffscreenRendering(bool wasOffscreenRendering);
      uint32_t m_offscreenRenderCount = 0;

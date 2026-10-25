@@ -1,7 +1,7 @@
-From d29cd7f1ae5190d704dabb13e2391eb4bdaf6257 Mon Sep 17 00:00:00 2001
+From 7ca09142b4714743973e08dd695ab5c215dfe136 Mon Sep 17 00:00:00 2001
 From: sneezeparty <38020091+sneezeparty@users.noreply.github.com>
 Date: Fri, 9 Oct 2026 10:24:11 -0700
-Subject: [PATCH 6/7] applets/pager: Add a setting for how often other
+Subject: [PATCH 6/8] applets/pager: Add a setting for how often other
  desktops' thumbnails update
 
 1 to 30 times per second, 1 by default.
